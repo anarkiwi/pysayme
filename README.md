@@ -1,6 +1,6 @@
 # pysayme
 
-Manage agentic code bloat - finds project code that duplicates functions or constants
+Manage agentic code bloat by finding project code that duplicates functions or constants
 that the project's own installed dependencies already export, and fails a pytest test
 naming the library function to call instead.
 
