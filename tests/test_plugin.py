@@ -3,6 +3,7 @@
 import pytest
 
 from conftest import KEYS, PROJECT, write_tree
+from pysayme import gate
 
 pytestmark = pytest.mark.usefixtures("site")
 
@@ -79,3 +80,16 @@ def test_gate_runs_once_under_xdist(proj):
     res.assert_outcomes(passed=1, failed=1)
     res.stdout.fnmatch_lines(["*2 workers*"])
     assert sum("FAILED pyproject.toml::pysayme" in ln for ln in res.outlines) == 1
+
+
+@pytest.mark.parametrize("args, want", [([], False), (["--pysayme-behaviour"], True)])
+def test_gate_behaviour_flag(proj, monkeypatch, args, want):
+    seen = []
+
+    def check(cfg):
+        seen.append(cfg.behaviour)
+        return gate.Result({}, {}, [], [])
+
+    monkeypatch.setattr(gate, "check", check)
+    proj.runpytest(*args).assert_outcomes(passed=2)
+    assert seen == [want]

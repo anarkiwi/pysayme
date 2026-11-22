@@ -228,17 +228,22 @@ def write_tree(root, files):
     return root
 
 
-def install_fakelib(site):
-    """Write ``fakelib`` and its dist-info under `site`."""
-    write_tree(site, LIB)
-    info = Path(site, "fakelib-1.0.dist-info")
+def install(site, name, files):
+    """Write distribution `name`'s `files` and its dist-info under `site`."""
+    write_tree(site, files)
+    info = Path(site, f"{name}-1.0.dist-info")
     info.mkdir()
     info.joinpath("METADATA").write_text(
-        "Metadata-Version: 2.1\nName: fakelib\nVersion: 1.0\n"
+        f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n", "utf-8"
     )
-    record = [f"{rel},," for rel in LIB] + ["fakelib-1.0.dist-info/METADATA,,"]
+    record = [f"{rel},," for rel in files] + [f"{name}-1.0.dist-info/METADATA,,"]
     info.joinpath("RECORD").write_text("\n".join(record) + "\n", "utf-8")
     return Path(site)
+
+
+def install_fakelib(site):
+    """Write ``fakelib`` and its dist-info under `site`."""
+    return install(site, "fakelib", LIB)
 
 
 @pytest.fixture(autouse=True)

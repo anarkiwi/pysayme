@@ -22,6 +22,11 @@ MIN_INLINED = 30
 CHUNK = 1 << 18
 
 
+def allow_key(item, target):
+    """The allowlist key of project `item` (with a path and qualname) -> `target`."""
+    return f"{item.path}:{item.qualname} -> {target}"
+
+
 @dataclass
 class Match:
     """A project function that duplicates a dependency function."""
@@ -38,7 +43,7 @@ class Match:
         return f"{lib.path}:{lib.qualname}" if self.local else lib.qualname
 
     def key(self):
-        return f"{self.project.path}:{self.project.qualname} -> {self._target()}"
+        return allow_key(self.project, self._target())
 
     def __str__(self):
         if self.local:

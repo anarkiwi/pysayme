@@ -40,6 +40,7 @@ item. The item fails if any of these hold:
 | Flag | Effect |
 |---|---|
 | `--pysayme` | run the gate even when paths or tests are selected |
+| `--pysayme-behaviour` | also gate on behavioural matches (see `behaviour`) |
 | `--no-pysayme` | never run it |
 | `-m "not pysayme"` | deselect it |
 
@@ -50,6 +51,7 @@ pysayme                                   # check, using pyproject.toml
 pysayme --dist numpy scipy -- src tests   # explicit dependencies and roots
 pysayme check --all                       # include allowlisted matches
 pysayme check --no-self                   # skip duplicates within the project
+pysayme check --behaviour                 # also run functions to match by behaviour
 pysayme rank --top 3                      # rank shape-independent look-alikes
 ```
 
@@ -73,6 +75,7 @@ pysayme rank --top 3                      # rank shape-independent look-alikes
 | `self` | `true` | also match project functions against each other |
 | `jobs` | all CPUs | worker processes and join threads |
 | `cache` | `true` | cache dependency indexes (`$PYSAYME_CACHE`, else `~/.cache/pysayme`) |
+| `behaviour` | `false` | also run project functions and dependency callables (compiled ones included) on seeded probes, and report project functions that behave like one (`--behaviour`); executes dependency code, so meant as a release gate |
 | `introspect` | `true` | import dependencies' public modules in a child process to find their public names (`--no-introspect`) |
 
 When `dists` and `requirements` are both unset, pysayme uses the installed

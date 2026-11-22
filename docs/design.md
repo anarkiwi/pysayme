@@ -189,3 +189,99 @@ through `d` unambiguous calls, so a thin entry point that delegates to private
 helpers is compared by what the helpers do.
 
 Scores are cosine similarities from chunked sparse products.
+
+## Behavioural fingerprinting (`behaviour = true`)
+
+The shape matcher needs a Python body on both sides, so it cannot see a project
+function that recomputes a ufunc, a builtin, or a Cython or Rust callable, nor one
+written in a different shape. Behaviour mode runs both sides on the same inputs and
+compares outputs. It executes dependency and project code, so it is opt-in: a
+release gate rather than an every-commit check. It needs the runtime pass, and turns
+it on.
+
+**Candidates.** On the library side, the runtime pass records each public callable,
+Python or compiled, under its shortest public path (one record per object). Classes,
+generators and coroutines are skipped, as is anything whose signature cannot be
+determined, that has a required keyword-only parameter, or that does not have 1 to
+3 required positional parameters. A ufunc has `nin` of them. On the project side,
+module-level functions and static methods of module-level classes qualify on the
+same terms, read from the AST; pytest tests (`test*`) and fixtures are skipped.
+A project file inside a package is imported by its dotted name, with the package's
+parent on `sys.path`; a loose script is loaded from its file.
+
+**Input kinds.** Each required parameter takes a set of kinds: bytes, 1-D float64,
+complex128 or bool arrays, int, or float.
+- Project parameters are read from annotations. An annotation naming no probed kind
+  (`str`, a project class) excludes the function. An unannotated parameter is tried
+  as a float array and as an int.
+- Library parameters unite the evidence of runtime annotations, the `.pyi` stub next
+  to the exporting or defining module (overloads united), and the numpydoc
+  `Parameters` type line (`x : array_like`, `n : int`, `data : bytes`,
+  `array_like of complex`), parsed with `ast`, `inspect` and string methods. A name
+  the parser does not know (a stub's type variable) is no evidence, while a known
+  unprobed type (`str`, `callable`) is. A callable none of whose evidence allows a
+  probed kind is skipped.
+- A library parameter without evidence is tried with every kind tuple some project
+  function needs. Library probing is demand-driven: a callable runs only on the
+  kind tuples that could join a project function.
+
+**Probes.** Each kind has 4 seeded probes per probe set, with byte lengths
+(0, 1, 5, 17), array lengths (7, 64, 7, 64) and ints (3, 8, 5, 12). Array
+parameters of one call share a length, and scalar and bytes parameters are offset
+by position, so two parameters of one kind differ. The verification set uses other
+lengths, ints and seeds.
+
+**Digests.** An output is canonicalized and hashed with BLAKE2b:
+- numeric arrays and scalars by element class (bool, integer, float, complex),
+  shape, and values rounded to 1e-9 of the array's largest magnitude, with NaN and
+  infinities kept apart;
+- bytes, str, lists and tuples recursively; dicts and sets order-free;
+- an exception by its type name.
+
+Anything else, or anything over the output cap, is opaque. The scale-normalised
+digest first divides each numeric array of 2 or more elements by its norm, so
+outputs equal up to a constant factor, or a per-input normalisation such as unit
+area, also match.
+
+A fingerprint is the tuple of digests over the probes. It distinguishes a function
+only when at least two of its outputs are distinct, informative (a value, not an
+exception or an opaque object) and not equal to one of the call's inputs. This rule
+drops constant functions, exception-only ones and identities. It does not drop a
+transform that maps empty input to empty output.
+
+**Binding.** A library callable runs with its defaults. It also runs with one
+keyword parameter changed at a time: a `bool` default flipped, or each other choice
+of a numpydoc literal set (`{'wrap', 'reflect'}`). Ufunc keywords are machinery, not
+behaviour, and are not varied. A match names the binding:
+`behavelib:ramp(reverse=True)`.
+
+**Matching.** Library fingerprints are put in dicts keyed by (kind tuple,
+fingerprint), one for exact digests and one for scale digests. Each project
+fingerprint is looked up there, with no pairwise comparison. Exact hits are used if
+there are any, else scale hits ("up to scale"). Then:
+1. A function whose body names a callable it matches is a wrapper that delegates,
+   not a reimplementation, and is dropped.
+2. As in shape matching, a project fingerprint shared by callables of several
+   distinct names is generic: a predicate that happens to agree on four probes, or a
+   reduction that `nan*` variants share. It is dropped unless `ambiguous = true`.
+   One name exported at several paths (`numpy:diff`, `numpy.ma:diff`) counts once,
+   reported under its shortest path.
+3. Each surviving pair runs again on the verification set, and is reported only if
+   the digests agree again and the project outputs still distinguish it.
+
+**Execution.** Calls run in a pool of spawned children (`runtime.Workers`, sized by
+`jobs`, also used by the runtime pass), with stdio on `/dev/null`, a scratch working
+directory, single-threaded BLAS, OpenMP and numba, and the Agg matplotlib backend.
+Each call has `probe.CALL_TIMEOUT` (2 s, against probes of at most 64 elements),
+signalled by SIGALRM and raised as a `BaseException` so library `except Exception`
+blocks do not swallow it. C code that holds the interpreter past twice that is ended
+by faulthandler's C watchdog thread, which exits the child. Each task also has a
+parent-side deadline as a backstop. A callable that times out, or kills its
+child, is skipped, and a fresh child takes the next task. Each call gets fresh
+inputs, so in-place mutation cannot leak into later probes.
+
+**Caching.** Library fingerprints are cached per distribution, next to its index
+and under the same key, as a dict from (path, binding, kind tuple) to fingerprint.
+Entries a new project's demand adds are computed and merged in. Crashes and timeouts
+are cached as such. Project fingerprints and verification are recomputed on every
+run.

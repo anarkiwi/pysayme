@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from . import sources
-from .match import find, find_constants, find_self
+from . import behaviour, sources
+from .match import allow_key, find, find_constants, find_self
 
 HOW = """\
 Each line above is project code that duplicates code in an installed dependency.
@@ -19,7 +19,8 @@ its key to [tool.pysayme.allow] in pyproject.toml with the reason as the value."
 
 def report(cfg):
     """{allowlist key: message} of every project function and constant that
-    duplicates one in `cfg.dists`, and, if `cfg.self_join`, another project one."""
+    duplicates one in `cfg.dists`, if `cfg.self_join` another project one, and if
+    `cfg.behaviour` every project function that behaves like a library callable."""
     jobs = cfg.jobs or os.cpu_count() or 1
     kw = {
         "jobs": jobs,
@@ -27,9 +28,9 @@ def report(cfg):
         "k": cfg.shingle,
         "progress": cfg.progress,
     }
-    lib_funcs, lib_consts = sources.library_index(
-        cfg.dists, cache=cfg.cache, introspect=cfg.introspect, **kw
-    )
+    introspect = cfg.introspect or cfg.behaviour
+    idx = sources.indexes(cfg.dists, cache=cfg.cache, introspect=introspect, **kw)
+    lib_funcs, lib_consts = sources.publish(idx)
     files = sources.project_files(cfg.roots, cfg.base, cfg.exclude)
     proj_funcs, proj_consts, _ = sources.index_files(files, "project", **kw)
     matches = find(
@@ -48,10 +49,17 @@ def report(cfg):
         )
     out = {m.key(): str(m) for m in matches}
     for p, lib in find_constants(proj_consts, lib_consts, cfg.private):
-        out[f"{p.path}:{p.qualname} -> {lib.qualname}"] = (
+        out[allow_key(p, lib.qualname)] = (
             f"{p.where()} {p.qualname} = {p.value!r} redefines "
             f"{lib.qualname} ({lib.where()})"
         )
+    if cfg.behaviour:
+        project = behaviour.project_candidates(files)
+        found = behaviour.find(
+            project, idx, kw["jobs"], cfg.cache, cfg.ambiguous, cfg.progress
+        )
+        for f in found:
+            out.setdefault(f.key(), str(f))
     return out
 
 

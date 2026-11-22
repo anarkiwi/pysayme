@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from conftest import write_tree
-from pysayme import runtime
+from pysayme import probe, runtime
 
 
 def plain(a, b):
@@ -77,10 +77,25 @@ def test_exports():
     def broken(name):
         raise RuntimeError(name)
 
-    assert runtime.exports(mod) == [("plain", runtime.describe(plain))]
-    mod.__all__ = ["n", "_hidden", "gone", 7]
+    want = ("plain", runtime.describe(plain), probe.spec(plain))
+    assert runtime.exports(mod) == [want]
+    mod.__all__ = ["n", "_hidden", "gone", 7, "Lying"]
     mod.__getattr__ = broken
-    assert runtime.exports(mod) == [("_hidden", runtime.describe(plain))]
+    mod.Lying = Lying
+    assert runtime.exports(mod) == [
+        ("_hidden", *want[1:]),
+        ("Lying", runtime.describe(Lying), None),
+    ]
+
+
+def test_spec_errors(monkeypatch):
+    def boom(*_):
+        raise RuntimeError
+
+    monkeypatch.setattr(probe, "spec", boom)
+    assert runtime.exports(types.SimpleNamespace(__name__="m", f=plain)) == [
+        ("f", runtime.describe(plain), None)
+    ]
 
 
 @pytest.fixture(name="rt")
@@ -104,8 +119,22 @@ def test_collect_isolates_crashes_and_hangs(rt):
     got = runtime.collect(mods, timeout=5, progress=False)
     assert set(got) == {"rtmods", "rtmods.bad", "rtmods.noisy"}
     here = os.path.realpath(rt / "rtmods/__init__.py")
-    assert got["rtmods"] == [("ok", ("def", here, "ok"))]
+    assert got["rtmods"] == [("ok", ("def", here, "ok"), probe.spec(rt_ok))]
     assert got["rtmods.bad"] == []
+
+
+def rt_ok(x):
+    return x
+
+
+@pytest.mark.usefixtures("rt")
+def test_workers_isolate_and_reuse():
+    tasks = ["rtmods", "rtmods.boom", "rtmods.noisy", "rtmods.hang", "rtmods"]
+    with runtime.Workers(runtime.module_exports, 2) as pool:
+        got = pool.map(tasks, lambda t: 5, progress=False)
+        assert [g is None for g in got] == [False, True, False, True, False]
+        assert pool.map(["rtmods"], 5, progress=False)[0] == got[0]
+        assert not pool.map([], 5, progress=False)
 
 
 def test_introspect_merges_records(monkeypatch, tmp_path):
@@ -138,19 +167,19 @@ def test_introspect_merges_records(monkeypatch, tmp_path):
         ],
     }
 
-    seen = []
+    spec = probe.Spec((probe.UNKNOWN,))
+    canned = {
+        m: [(n, r, spec if r[0] in ("def", "compiled") else None) for n, r in items]
+        for m, items in canned.items()
+    }
 
-    def collect(modules, timeout, shared):
-        assert timeout == runtime.IMPORT_TIMEOUT and shared is not None
-        seen.append(modules)
-        return {m: canned[m] for m in modules}
+    def collect(modules, timeout, desc, progress, jobs):
+        assert modules == ["pkg", "pkg.pub"] and timeout == runtime.IMPORT_TIMEOUT
+        assert (desc, progress, jobs) == ("import", True, 2)
+        return canned
 
     monkeypatch.setattr(runtime, "collect", collect)
-    exports, compiled = runtime.introspect(entries, jobs=2)
-    assert sorted(seen) == [["pkg"], ["pkg.pub"]]
-    seen.clear()
-    runtime.introspect(entries, jobs=1)
-    assert seen == [["pkg", "pkg.pub"]]
+    exports, compiled, probed = runtime.introspect(entries, jobs=2)
     assert exports == {
         ("pkg._impl", "f"): {"pkg", "pkg.pub"},
         ("pkg._impl", "C"): {"pkg"},
@@ -159,4 +188,11 @@ def test_introspect_merges_records(monkeypatch, tmp_path):
     assert compiled == [
         runtime.Compiled("pkg:g2", "builtin", None, ""),
         runtime.Compiled("pkg:sin", "ufunc", "(x)", "sine"),
+    ]
+    assert probed == [
+        runtime.Callable("pkg.pub:x", spec),
+        runtime.Callable("pkg:f", spec),
+        runtime.Callable("pkg:g", spec),
+        runtime.Callable("pkg:g2", spec),
+        runtime.Callable("pkg:sin", spec),
     ]
