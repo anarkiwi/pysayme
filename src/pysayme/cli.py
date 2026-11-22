@@ -15,6 +15,13 @@ def _common(p):
     p.add_argument("--config", default="pyproject.toml", help="pyproject.toml to read")
     p.add_argument("--dist", nargs="+", dest="dists", help="installed distributions")
     p.add_argument("--jobs", type=int, help="indexing processes (default: all CPUs)")
+    p.add_argument(
+        "--no-introspect",
+        dest="introspect",
+        action="store_false",
+        default=None,
+        help="do not import dependencies to find their public names",
+    )
     p.add_argument("roots", nargs="*", help="project directories or files")
 
 
@@ -54,13 +61,16 @@ def main(argv=None):
     a = parser().parse_args(argv)
     over = {k: getattr(a, k, None) for k in ("dists", "jobs", "copy", "inlined")}
     over.update({k: getattr(a, k, None) for k in ("private", "cache", "self_join")})
+    over["introspect"] = a.introspect
     cfg = load_config(a.config, roots=a.roots or None, **over)
     if not cfg.dists:
         print("pysayme: no dependencies to check against", file=sys.stderr)
         return 2
     if a.command == "rank":
         files = sources.project_files(cfg.roots, cfg.base, cfg.exclude)
-        lib, proj, background = semantic.corpus(cfg.dists, files, a.depth)
+        lib, proj, background = semantic.corpus(
+            cfg.dists, files, a.depth, cfg.introspect
+        )
         ranks = semantic.ranked(lib, proj, background, a.top)
         for key, hits in sorted(ranks.items()):
             hits = [h for h in hits if h[0] >= a.min_score]

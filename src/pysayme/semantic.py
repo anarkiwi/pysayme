@@ -152,22 +152,15 @@ def _parse_all(entries):
             yield tree, display, module
 
 
-def corpus(dists, project_entries, depth=2):
+def corpus(dists, project_entries, depth=2, introspect=True):
     """(library {key: [Counter per depth]}, project {key: Counter}, [Counter of
     every library function], the documents idf is taken over with the project's)."""
     lib_trees = {}
     for name in dists:
-        entries = sources.dist_files(name) or []
+        entries = [e for e in sources.dist_files(name) or [] if e[0].suffix == ".py"]
         lib_trees[name] = list(_parse_all(tqdm(entries, desc=name, leave=False)))
     vocab, consts = vocabulary(t for ts in lib_trees.values() for t, _, _ in ts)
-    best = sources.public_paths(
-        [
-            (module, *r)
-            for ts in lib_trees.values()
-            for tree, display, module in ts
-            for r in extract.reexports(tree, module, display.endswith("__init__.py"))
-        ]
-    )
+    best = sources.naming(sources.indexes(dists, introspect=introspect))
     lib, background = {}, []
     for trees in lib_trees.values():
         feats = {}

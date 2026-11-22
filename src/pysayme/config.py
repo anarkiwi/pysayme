@@ -32,6 +32,7 @@ class Config:
     self_join: bool = True
     jobs: int = 0
     cache: bool = True
+    introspect: bool = True
     progress: bool = True
 
 

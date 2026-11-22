@@ -69,6 +69,85 @@ LIB = {
             parts = text.split(sep)
             return [p.strip().upper() for p in parts if p and p.isidentifier()]
     """,
+    "fakelib/stars.py": """
+        from ._star import *
+    """,
+    "fakelib/_star.py": """
+        __all__ = ["starred"]
+
+
+        def starred(words, width):
+            lines, cur = [], []
+            for w in words:
+                if sum(map(len, cur)) + len(w) > width:
+                    lines.append(" ".join(cur))
+                    cur = []
+                cur.append(w)
+            return lines + [" ".join(cur)] if cur else lines
+
+
+        def unlisted(table, key):
+            seen = set()
+            for row in table:
+                k = row.get(key)
+                if k in seen:
+                    raise KeyError(k)
+                seen.add(k)
+            return sorted(seen, reverse=True)
+    """,
+    "fakelib/lazy/__init__.py": """
+        import importlib
+
+
+        def __getattr__(name):
+            return getattr(importlib.import_module("._impl", __name__), name)
+
+
+        __all__ = list(map(str, ("stubbed",)))
+    """,
+    "fakelib/lazy/__init__.pyi": """
+        from ._impl import stubbed as stubbed
+
+        __all__ = ["stubbed"]
+    """,
+    "fakelib/lazy/_impl.py": """
+        def stubbed(items, n):
+            buckets = [[] for _ in range(n)]
+            for i, it in enumerate(items):
+                buckets[hash(it.key) % n].append((i, it.value * 3))
+            return [b for b in buckets if len(b) > 1]
+    """,
+    "fakelib/dyn.py": """
+        import functools
+        import importlib
+
+        _impl = importlib.import_module("fakelib._dyn").dynamic
+        dynamic = functools.wraps(_impl)(lambda *a: _impl(*a))
+    """,
+    "fakelib/_dyn.py": """
+        def dynamic(stream, stop):
+            total, count = 0.0, 0
+            while count < stop:
+                chunk = stream.read(count + 1)
+                if not chunk:
+                    break
+                total += chunk.mean() ** 2
+                count += 1
+            return total / max(count, 1)
+    """,
+    "fakelib/ext.py": """
+        def overload(fn):
+            return lambda impl: impl
+
+
+        @overload(len)
+        def len_impl(seq):
+            n = 0
+            for item in seq.items:
+                if item is not None and item.size:
+                    n += item.size // 2
+            return n
+    """,
     "fakelib/tests/test_x.py": UNRELATED,
     "fakelib/__main__.py": UNRELATED,
 }

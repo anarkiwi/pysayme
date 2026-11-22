@@ -8,6 +8,7 @@ import builtins
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -17,6 +18,30 @@ _MIX = np.uint64(0x100000001B3)
 _TOKEN_IDS: dict[str, int] = {}
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
+REGISTRATIONS = frozenset(
+    (
+        "box",
+        "infer",
+        "infer_getattr",
+        "infer_global",
+        "intrinsic",
+        "lower",
+        "lower_builtin",
+        "lower_cast",
+        "lower_constant",
+        "lower_getattr",
+        "lower_getattr_generic",
+        "lower_setattr",
+        "lower_setattr_generic",
+        "overload",
+        "overload_attribute",
+        "overload_classmethod",
+        "overload_method",
+        "register_model",
+        "type_callable",
+        "unbox",
+    )
+)
 
 
 @dataclass
@@ -28,6 +53,7 @@ class Func:
     line: int
     shingles: np.ndarray = field(repr=False, compare=False)
     public: bool = True
+    free: int = 0
 
     def where(self):
         return f"{self.path}:{self.line}"
@@ -125,16 +151,31 @@ def shingles(fn, k=K):
     return shingle_hashes(t.out, k)
 
 
+def registered(node):
+    """Whether a def is decorated by a REGISTRATIONS name, bare or called: an
+    implementation handed to a registry rather than API."""
+    for d in node.decorator_list:
+        f = d.func if isinstance(d, ast.Call) else d
+        name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+        if name in REGISTRATIONS:
+            return True
+    return False
+
+
+def private_module(module):
+    return any(p.startswith("_") for p in module.split("."))
+
+
 def walk_defs(tree):
-    """(qualname, node, public) of every def and class; `public` is importable: no
-    ``_private`` component and not nested in a function."""
+    """(qualname, node, public) of every def and class; `public` is importable API:
+    no ``_private`` component, not nested in a function, not registered."""
 
     def walk(node, prefix, public):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, _DEFS):
                 name = f"{prefix}.{child.name}" if prefix else child.name
                 pub = public and not child.name.startswith("_")
-                pub = pub and not isinstance(node, _FUNCS)
+                pub = pub and not isinstance(node, _FUNCS) and not registered(child)
                 yield name, child, pub
                 yield from walk(child, name, pub)
 
@@ -148,6 +189,20 @@ def parse(path):
         return None
 
 
+def free_names(fn):
+    """Hash of the names `fn`'s body loads but never binds: its globals and callees."""
+    loads, bound = set(), {a.arg for a in ast.walk(fn.args) if isinstance(a, ast.arg)}
+    for stmt in body(fn):
+        for n in ast.walk(stmt):
+            if isinstance(n, ast.Name):
+                (loads if isinstance(n.ctx, ast.Load) else bound).add(n.id)
+            elif isinstance(n, ast.arg):
+                bound.add(n.arg)
+            elif isinstance(n, _DEFS):
+                bound.add(n.name)
+    return zlib.crc32("\0".join(sorted(loads - bound)).encode())
+
+
 def functions(tree, display, module="", min_shingles=12, k=K):
     out = []
     for name, node, pub in walk_defs(tree):
@@ -155,7 +210,7 @@ def functions(tree, display, module="", min_shingles=12, k=K):
             sh = shingles(node, k)
             if len(sh) >= min_shingles:
                 q = f"{module}:{name}" if module else name
-                out.append(Func(q, display, node.lineno, sh, pub))
+                out.append(Func(q, display, node.lineno, sh, pub, free_names(node)))
     return out
 
 
@@ -236,34 +291,151 @@ def _module_level(stmts):
             )
 
 
-def _all(tree):
-    for _, name, value in _assignments(tree):
-        if name == "__all__":
-            try:
-                return set(literal(value))
-            except (ValueError, TypeError):
-                return None
+class Module(NamedTuple):
+    """What one module (or its ``.pyi`` stub) binds and exports, statically."""
+
+    name: str
+    imports: tuple
+    stars: tuple
+    bound: frozenset
+    all_names: frozenset | None
+    all_from: tuple
+
+
+_SEQUENCE_CALLS = frozenset(("list", "tuple", "sorted", "set", "frozenset"))
+
+
+def _dotted(node, aliases):
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id)
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value, aliases)
+        return base and f"{base}.{node.attr}"
     return None
 
 
-def reexports(tree, module, package):
-    """(source module, name, exported name) of each module-level ``from M import``
-    of `tree` (``if``/``try`` blocks included) that ``__all__``, if any, lists."""
+def _element(node, aliases):
+    if isinstance(node, ast.Starred):
+        return _all_parts(node.value, aliases)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}, []
+    return None
+
+
+def _unwrapped(node):
+    """The sequence a ``list(x)``-style or ``x.copy()`` call copies, else None."""
+    if not isinstance(node, ast.Call) or node.keywords or len(node.args) > 1:
+        return None
+    f = node.func
+    if isinstance(f, ast.Name) and f.id in _SEQUENCE_CALLS and node.args:
+        return node.args[0]
+    if isinstance(f, ast.Attribute) and f.attr == "copy" and not node.args:
+        return f.value
+    return None
+
+
+def _all_parts(node, aliases):
+    """(names, modules whose ``__all__`` is included) of an ``__all__`` value, or
+    None when it is not statically known."""
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        parts = [_element(e, aliases) for e in node.elts]
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        parts = [_all_parts(node.left, aliases), _all_parts(node.right, aliases)]
+    elif isinstance(node, ast.Attribute) and node.attr == "__all__":
+        mod = _dotted(node.value, aliases)
+        parts = [mod and (set(), [mod])]
+    else:
+        inner = _unwrapped(node)
+        parts = [None if inner is None else _all_parts(inner, aliases)]
+    if None in parts:
+        return None
+    return set().union(*(p[0] for p in parts)), [m for p in parts for m in p[1]]
+
+
+def _is_all(node):
+    return isinstance(node, ast.Name) and node.id == "__all__"
+
+
+def _all_updates(node):
+    """The values `node` assigns or adds to ``__all__``: ``[]`` for none, None for
+    one that is not statically known."""
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if any(isinstance(t, ast.Tuple) and any(map(_is_all, t.elts)) for t in targets):
+            return None
+        hit = node.value is not None and any(map(_is_all, targets))
+        return [node.value] if hit else []
+    call = node.value if isinstance(node, ast.Expr) else None
+    f = getattr(call, "func", None)
+    if not (
+        isinstance(call, ast.Call)
+        and isinstance(f, ast.Attribute)
+        and _is_all(f.value)
+        and len(call.args) == 1
+    ):
+        return []
+    return {"extend": call.args, "append": [ast.List([call.args[0]])]}.get(f.attr, [])
+
+
+def _imported(node, parts):
+    """(local name, dotted target, re-export or None) of each name an import
+    binds, and the sources of its ``*`` imports."""
+    if isinstance(node, ast.Import):
+        tops = [(a, a.asname or a.name.split(".", 1)[0]) for a in node.names]
+        return [(t, a.name if a.asname else t, None) for a, t in tops], []
+    keep = len(parts) - node.level + 1 if node.level else 0
+    if keep < 0:
+        return [], []
+    src = ".".join(parts[:keep] + ([node.module] if node.module else []))
+    named = [a for a in node.names if a.name != "*"]
+    got = [(a.asname or a.name, f"{src}.{a.name}", a) for a in named]
+    stars = [src] if len(named) < len(node.names) else []
+    return [(loc, t, (src, a.name, loc)) for loc, t, a in got], stars
+
+
+def _assigned(node):
+    if isinstance(node, _DEFS):
+        return [node.name]
+    if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+        return []
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    elts = [e for t in targets for e in (t.elts if isinstance(t, ast.Tuple) else [t])]
+    return [e.id for e in elts if isinstance(e, ast.Name)]
+
+
+def module_info(tree, module, package):
+    """`tree`'s Module record: its module-level ``from M import`` re-exports and
+    ``*`` imports (``if``/``try`` blocks included), public bound names and
+    ``__all__``, whose parts may name other modules' ``__all__``."""
     parts = module.split(".") if module else []
     if not package:
         parts = parts[:-1]
-    public = _all(tree)
-    out = []
+    imports, stars, bound, aliases = [], [], set(), {}
+    names, mods, known = set(), [], None
     for node in _module_level(tree.body):
-        if not isinstance(node, ast.ImportFrom):
-            continue
-        keep = len(parts) - node.level + 1 if node.level else 0
-        if keep < 0:
-            continue
-        src = ".".join(parts[:keep] + ([node.module] if node.module else []))
-        out += [
-            (src, a.name, a.asname or a.name)
-            for a in node.names
-            if a.name != "*" and (public is None or (a.asname or a.name) in public)
-        ]
-    return out
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            got, star = _imported(node, parts)
+            stars += star
+            for local, target, imp in got:
+                aliases[local] = target
+                bound.add(local)
+                imports += [imp] if imp else []
+        bound.update(_assigned(node))
+        updates = _all_updates(node)
+        for got in (
+            [None] if updates is None else (_all_parts(v, aliases) for v in updates)
+        ):
+            if got is None:
+                known = False
+            elif known is not False:
+                known = True
+                names |= got[0]
+                mods += got[1]
+    return Module(
+        module,
+        tuple(imports),
+        tuple(stars),
+        frozenset(b for b in bound if not b.startswith("_")),
+        frozenset(names) if known else None,
+        tuple(mods) if known else (),
+    )
