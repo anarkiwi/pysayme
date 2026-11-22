@@ -3,6 +3,7 @@ processes, so library imports cannot pollute, hang or crash the caller."""
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import importlib
 import inspect
@@ -11,6 +12,7 @@ import os
 import sys
 import warnings
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from typing import NamedTuple
 
 from tqdm import tqdm
@@ -114,13 +116,23 @@ def _serve(modules, conn):
     conn.close()
 
 
-def collect(modules, timeout=IMPORT_TIMEOUT, desc="import", progress=True):
+def _bar(total, desc, progress):
+    opts = {"desc": desc, "unit": "module", "leave": False, "file": sys.stderr}
+    return tqdm(total=total, disable=not progress, **opts)
+
+
+def collect(modules, timeout=IMPORT_TIMEOUT, desc="import", progress=True, shared=None):
     """{module: [(name, record)]} of each of `modules` imported in a spawned child;
-    one that times out or kills its child is skipped and a new child continues."""
+    one that times out or kills its child is skipped and a new child continues.
+    Progress goes to the `shared` tqdm bar when given."""
     ctx = multiprocessing.get_context("spawn")
     out, pos = {}, 0
-    opts = {"desc": desc, "unit": "module", "leave": False, "file": sys.stderr}
-    with tqdm(total=len(modules), disable=not progress, **opts) as shown:
+    own = shared is None
+    with (
+        contextlib.nullcontext(shared)
+        if not own
+        else _bar(len(modules), desc, progress)
+    ) as shown:
         while pos < len(modules):
             recv, send = ctx.Pipe(duplex=False)
             child = ctx.Process(target=_serve, args=(modules[pos:], send), daemon=True)
@@ -142,17 +154,56 @@ def collect(modules, timeout=IMPORT_TIMEOUT, desc="import", progress=True):
     return out
 
 
-def introspect(entries, timeout=IMPORT_TIMEOUT, desc="import", progress=True):
+def units(entries):
+    """The public modules of (path, display, module) `entries`, grouped by top-level
+    subpackage (``scipy.signal``): each group is imported by one child."""
+    groups = defaultdict(list)
+    for m in sorted({m for _, _, m in entries}):
+        if m and not extract.private_module(m):
+            groups[".".join(m.split(".", 2)[:2])].append(m)
+    return list(groups.values())
+
+
+def collect_all(groups, jobs=1, timeout=IMPORT_TIMEOUT, desc="import", progress=True):
+    """collect() of the module lists `groups` on at most `jobs` children: groups are
+    packed largest first into the least-loaded child, so each child imports a
+    shared base package once. One {module: [(name, record)]} per group."""
+    bins = [[] for _ in range(max(1, min(jobs, len(groups))))]
+    load = [0] * len(bins)
+    for i in sorted(range(len(groups)), key=lambda i: -len(groups[i])):
+        j = load.index(min(load))
+        bins[j].append(i)
+        load[j] += len(groups[i])
+    with _bar(sum(load), desc, progress) as shown:
+        with ThreadPoolExecutor(len(bins)) as pool:
+            got = pool.map(
+                lambda b: collect(
+                    [m for i in b for m in groups[i]], timeout, shared=shown
+                ),
+                bins,
+            )
+            merged = {}
+            for part in got:
+                merged.update(part)
+    return [{m: merged[m] for m in g if m in merged} for g in groups]
+
+
+def introspect(entries, timeout=IMPORT_TIMEOUT, desc="import", progress=True, jobs=1):
     """({(module, name): exporting modules}, [Compiled]) of a distribution's
     (path, display, module) `entries`: the public modules that bind each of its
     top-level definitions under its own name, and its compiled public callables."""
+    got = collect_all(units(entries), jobs, timeout, desc, progress)
+    return resolve(entries, {m: v for g in got for m, v in g.items()})
+
+
+def resolve(entries, collected):
+    """introspect()'s result from `collected` {module: [(name, record)]}."""
     files = {os.path.realpath(p): m for p, _, m in entries if str(p).endswith(".py")}
     known = {m for _, _, m in entries}
     tops = {m.split(".", 1)[0] for m in known}
-    modules = sorted(m for m in known if m and not extract.private_module(m))
     found = defaultdict(set)
     compiled = {}
-    for mod, items in collect(modules, timeout, desc, progress).items():
+    for mod, items in collected.items():
         for name, rec in items:
             if rec[0] == "compiled":
                 owner = rec[1]

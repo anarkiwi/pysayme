@@ -138,13 +138,19 @@ def test_introspect_merges_records(monkeypatch, tmp_path):
         ],
     }
 
-    def collect(modules, timeout, desc, progress):
-        assert modules == ["pkg", "pkg.pub"] and timeout == runtime.IMPORT_TIMEOUT
-        assert (desc, progress) == ("import", True)
-        return canned
+    seen = []
+
+    def collect(modules, timeout, shared):
+        assert timeout == runtime.IMPORT_TIMEOUT and shared is not None
+        seen.append(modules)
+        return {m: canned[m] for m in modules}
 
     monkeypatch.setattr(runtime, "collect", collect)
-    exports, compiled = runtime.introspect(entries)
+    exports, compiled = runtime.introspect(entries, jobs=2)
+    assert sorted(seen) == [["pkg"], ["pkg.pub"]]
+    seen.clear()
+    runtime.introspect(entries, jobs=1)
+    assert seen == [["pkg", "pkg.pub"]]
     assert exports == {
         ("pkg._impl", "f"): {"pkg", "pkg.pub"},
         ("pkg._impl", "C"): {"pkg"},

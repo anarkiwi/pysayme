@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from . import sources
@@ -19,8 +20,9 @@ its key to [tool.pysayme.allow] in pyproject.toml with the reason as the value."
 def report(cfg):
     """{allowlist key: message} of every project function and constant that
     duplicates one in `cfg.dists`, and, if `cfg.self_join`, another project one."""
+    jobs = cfg.jobs or os.cpu_count() or 1
     kw = {
-        "jobs": cfg.jobs or None,
+        "jobs": jobs,
         "min_shingles": cfg.min_shingles,
         "k": cfg.shingle,
         "progress": cfg.progress,
@@ -38,10 +40,11 @@ def report(cfg):
         cfg.min_inlined,
         cfg.private,
         cfg.ambiguous,
+        jobs,
     )
     if cfg.self_join:
         matches += find_self(
-            proj_funcs, cfg.copy, cfg.inlined, cfg.min_inlined, cfg.ambiguous
+            proj_funcs, cfg.copy, cfg.inlined, cfg.min_inlined, cfg.ambiguous, jobs
         )
     out = {m.key(): str(m) for m in matches}
     for p, lib in find_constants(proj_consts, lib_consts, cfg.private):

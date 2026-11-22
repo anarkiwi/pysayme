@@ -8,6 +8,7 @@ prefix filtering (rarest shingles first) and are scored exactly with sparse prod
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -86,11 +87,19 @@ def _overlap(p, lib, pi, li):
     return out
 
 
-def _join(project, library, copy, inlined, min_inlined):
+def _balanced(sizes, n):
+    """Row bounds of at most `n` contiguous chunks with about equal total size."""
+    cum = np.cumsum(sizes)
+    cuts = np.searchsorted(cum, cum[-1] * np.arange(1, n) / n) if len(cum) else []
+    return np.unique(np.concatenate(([0], cuts, [len(sizes)])))
+
+
+def _join(project, library, copy, inlined, min_inlined, jobs=1):
     """(project index, library index, inlined?, score) of every qualifying pair.
 
     Candidates share a token in both prefixes (Jaccard) or in the library prefix
-    (containment), the AllPairs bounds; a length filter precedes exact scoring."""
+    (containment), the AllPairs bounds; a length filter precedes exact scoring.
+    Project rows are joined in size-balanced chunks on `jobs` threads."""
     psets = [f.shingles for f in project]
     lsets = [f.shingles for f in library]
     vocab = np.unique(np.concatenate(psets + lsets))
@@ -101,22 +110,30 @@ def _join(project, library, copy, inlined, min_inlined):
     rank = np.empty(len(vocab), np.int64)
     rank[np.lexsort((np.arange(len(vocab)), df))] = np.arange(len(vocab))
     big = sparse.diags((lsize >= min_inlined).astype(np.float32))
-    cand = _prefix(p, psize, rank, copy) @ _prefix(lib, lsize, rank, copy).T
-    cand = cand + p @ (big @ _prefix(lib, lsize, rank, inlined)).T
-    cand = cand.tocoo()
-    pi, li = cand.row, cand.col
-    ps, ls = psize[pi], lsize[li]
-    fits = ((ls >= copy * ps) & (copy * ls <= ps)) | (
-        (ls >= min_inlined) & (inlined * ls <= ps)
-    )
-    pi, li = pi[fits], li[fits]
-    shared = _overlap(p, lib, pi, li)
-    jac = shared / (psize[pi] + lsize[li] - shared)
-    inl = shared / lsize[li]
-    is_copy = jac >= copy
-    is_inl = ~is_copy & (inl >= inlined) & (lsize[li] >= min_inlined)
-    ok = is_copy | is_inl
-    return pi[ok], li[ok], is_inl[ok], np.where(is_inl, inl, jac)[ok]
+    p_copy = _prefix(p, psize, rank, copy)
+    l_copy = _prefix(lib, lsize, rank, copy).T.tocsc()
+    l_inl = (big @ _prefix(lib, lsize, rank, inlined)).T.tocsc()
+
+    def rows(lo, hi):
+        cand = (p_copy[lo:hi] @ l_copy + p[lo:hi] @ l_inl).tocoo()
+        pi, li = cand.row + lo, cand.col
+        ps, ls = psize[pi], lsize[li]
+        fits = ((ls >= copy * ps) & (copy * ls <= ps)) | (
+            (ls >= min_inlined) & (inlined * ls <= ps)
+        )
+        pi, li = pi[fits], li[fits]
+        shared = _overlap(p, lib, pi, li)
+        jac = shared / (psize[pi] + lsize[li] - shared)
+        inl = shared / lsize[li]
+        is_copy = jac >= copy
+        is_inl = ~is_copy & (inl >= inlined) & (lsize[li] >= min_inlined)
+        ok = is_copy | is_inl
+        return pi[ok], li[ok], is_inl[ok], np.where(is_inl, inl, jac)[ok]
+
+    bounds = _balanced(psize, 4 * max(1, jobs))
+    with ThreadPoolExecutor(max(1, jobs)) as pool:
+        parts = list(pool.map(rows, bounds[:-1], bounds[1:]))
+    return tuple(np.concatenate(x) for x in zip(*parts))
 
 
 def _rivals(pi, li, library, n, callees=True):
@@ -144,6 +161,7 @@ def find(
     min_inlined=MIN_INLINED,
     private=False,
     ambiguous=False,
+    jobs=1,
 ):
     """Best library match of each project Func that has one, best score first.
 
@@ -152,7 +170,7 @@ def find(
     Only public matches unless `private`; only unambiguous ones unless `ambiguous`."""
     if not project or not library:
         return []
-    pi, li, is_inl, score = _join(project, library, copy, inlined, min_inlined)
+    pi, li, is_inl, score = _join(project, library, copy, inlined, min_inlined, jobs)
     rivals = _rivals(pi, li, library, len(project))
     if not private:
         public = np.fromiter((f.public for f in library), bool, len(library))[li]
@@ -184,7 +202,12 @@ def _nested(funcs, pi, li):
 
 
 def find_self(
-    funcs, copy=COPY, inlined=INLINED, min_inlined=MIN_INLINED, ambiguous=False
+    funcs,
+    copy=COPY,
+    inlined=INLINED,
+    min_inlined=MIN_INLINED,
+    ambiguous=False,
+    jobs=1,
 ):
     """Project Funcs duplicating other project Funcs, by path then qualname.
 
@@ -192,7 +215,7 @@ def find_self(
     pairs whose copying sides each match one shape, unless `ambiguous`."""
     if not funcs:
         return []
-    pi, li, is_inl, score = _join(funcs, funcs, copy, inlined, min_inlined)
+    pi, li, is_inl, score = _join(funcs, funcs, copy, inlined, min_inlined, jobs)
     keep = ~_nested(funcs, pi, li)
     pi, li, is_inl, score = pi[keep], li[keep], is_inl[keep], score[keep]
     rivals = _rivals(pi, li, funcs, len(funcs), callees=False)
