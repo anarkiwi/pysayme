@@ -57,8 +57,9 @@ def random_sets(rng, n_proj, n_lib, universe):
     return psets, lsets
 
 
+@pytest.mark.parametrize("jobs", [1, 3])
 @pytest.mark.parametrize("seed", range(6))
-def test_join_matches_brute_force(seed):
+def test_join_matches_brute_force(seed, jobs):
     rng = np.random.default_rng(seed)
     psets, lsets = random_sets(rng, 300, 60, 300)
     copy, inlined, min_inlined = [
@@ -68,14 +69,14 @@ def test_join_matches_brute_force(seed):
     want = brute(psets, lsets, copy, inlined, min_inlined)
     assert want
     pi, li, inl, score = match._join(  # pylint: disable=protected-access
-        funcs(psets, "p"), funcs(lsets, "l"), copy, inlined, min_inlined
+        funcs(psets, "p"), funcs(lsets, "l"), copy, inlined, min_inlined, jobs
     )
     got = {(int(i), int(j)): (bool(k), s) for i, j, k, s in zip(pi, li, inl, score)}
     assert got.keys() == want.keys()
     for key, (kind, s) in want.items():
         assert got[key][0] == kind and got[key][1] == pytest.approx(s)
     pi, li, inl, _ = match._join(  # pylint: disable=protected-access
-        funcs(psets, "p"), funcs(psets, "p"), copy, inlined, min_inlined
+        funcs(psets, "p"), funcs(psets, "p"), copy, inlined, min_inlined, jobs
     )
     got = {(int(i), int(j)): bool(k) for i, j, k in zip(pi, li, inl)}
     assert got == {
@@ -253,3 +254,13 @@ def test_self_join_template_ignores_callees():
     for i, f in enumerate(fs):
         f.path, f.free = f"m{i}.py", i
     assert len(match.find_self(fs)) == 3
+
+
+def test_balanced_chunks_cover_rows_evenly():
+    balanced = match._balanced  # pylint: disable=protected-access
+    sizes = np.array([100, 1, 1, 1, 100, 1, 1, 100])
+    bounds = balanced(sizes, 3)
+    assert bounds[0] == 0 and bounds[-1] == len(sizes)
+    totals = [sizes[a:b].sum() for a, b in zip(bounds[:-1], bounds[1:])]
+    assert len(totals) == 3 and max(totals) <= 103
+    assert list(balanced(np.array([5]), 4)) == [0, 1]

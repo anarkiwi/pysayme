@@ -158,6 +158,18 @@ A project constant matches when either of these holds:
 Collections that are an arithmetic progression of integers (`range` values) never
 match by value alone.
 
+## Parallelism
+
+`jobs` (default: all CPUs) bounds every parallel stage:
+- **Parsing:** one process pool parses the uncached files of all distributions, and
+  the project's files, so small distributions do not run serially.
+- **Introspection:** a distribution's public modules are grouped by top-level
+  subpackage (`scipy.signal`, `scipy.ndimage`) and packed, largest first, onto at
+  most `jobs` import children. Each child imports a shared base package once.
+- **Joins:** project rows are split into chunks of about equal total shingle count,
+  and each chunk's candidate products and exact overlaps run on a thread pool. The
+  scipy sparse kernels release the GIL.
+
 ## Semantic ranking (`pysayme rank`)
 
 `rank` is a research aid for duplicates written in a different shape. It does not

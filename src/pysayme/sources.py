@@ -116,10 +116,8 @@ def _index_star(args):
     return index_file(*args)
 
 
-def index_files(entries, desc, jobs=None, min_shingles=12, k=extract.K, progress=True):
-    """Concatenated (functions, constants, Modules) of `entries`, in parallel when
-    many."""
-    funcs, consts, reexp = [], [], []
+def index_each(entries, desc, jobs=None, min_shingles=12, k=extract.K, progress=True):
+    """index_file() of each of `entries`, in one process pool when many."""
     jobs = jobs or os.cpu_count() or 1
     work = [(e, min_shingles, k) for e in entries]
     opts = {"desc": desc, "unit": "file", "total": len(work), "leave": False}
@@ -127,17 +125,23 @@ def index_files(entries, desc, jobs=None, min_shingles=12, k=extract.K, progress
     if jobs > 1 and len(work) >= PARALLEL_MIN_FILES:
         ctx = multiprocessing.get_context("forkserver")
         with ProcessPoolExecutor(jobs, mp_context=ctx) as pool:
-            results = pool.map(_index_star, work, chunksize=16)
-            for f, c, r in tqdm(results, **opts):
-                funcs += f
-                consts += c
-                reexp += r
-    else:
-        for f, c, r in tqdm(map(_index_star, work), **opts):
-            funcs += f
-            consts += c
-            reexp += r
-    return funcs, consts, reexp
+            chunk = max(1, len(work) // (4 * jobs))
+            return list(tqdm(pool.map(_index_star, work, chunksize=chunk), **opts))
+    return list(tqdm(map(_index_star, work), **opts))
+
+
+def _concat(results):
+    funcs, consts, mods = [], [], []
+    for f, c, m in results:
+        funcs += f
+        consts += c
+        mods += m
+    return funcs, consts, mods
+
+
+def index_files(entries, desc, jobs=None, min_shingles=12, k=extract.K, progress=True):
+    """Concatenated (functions, constants, Modules) of `entries`."""
+    return _concat(index_each(entries, desc, jobs, min_shingles, k, progress))
 
 
 def cache_dir():
@@ -156,8 +160,31 @@ def _cache_key(name, entries, params):
     return h.hexdigest()
 
 
-def dist_index(
-    name,
+def _cache_path(name, entries, params):
+    key = _cache_key(name, entries, params)
+    return cache_dir() / f"{metadata.distribution(name).metadata['Name']}-{key}.pkl"
+
+
+def _load(path):
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except (OSError, EOFError, pickle.UnpicklingError, AttributeError):
+        return None
+
+
+def _store(path, name, index):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as f:
+            pickle.dump(index, f, pickle.HIGHEST_PROTOCOL)
+        os.replace(f.name, path)
+    except OSError as e:
+        warnings.warn(f"pysayme: cannot cache index of {name}: {e}")
+
+
+def build(
+    found,
     jobs=None,
     min_shingles=12,
     k=extract.K,
@@ -165,39 +192,45 @@ def dist_index(
     progress=True,
     introspect=True,
 ):
-    """Index of installed distribution `name`, cached by the size and mtime of
-    each of its files; None when it is not installed. `introspect` adds what
-    importing its public modules exports."""
-    entries = dist_files(name)
-    if entries is None:
-        return None
-    path = None
-    if cache:
-        params = (min_shingles, k, introspect, sys.version)
-        key = _cache_key(name, entries, params)
-        path = cache_dir() / f"{metadata.distribution(name).metadata['Name']}-{key}.pkl"
-        try:
-            with open(path, "rb") as f:
-                return pickle.load(f)
-        except (OSError, EOFError, pickle.UnpicklingError, AttributeError):
-            pass
-    out = Index(
-        *index_files(entries, name, jobs, min_shingles, k, progress),
-        *(
-            runtime.introspect(entries, desc=f"{name} import", progress=progress)
-            if introspect
-            else ({}, [])
-        ),
+    """Index of each (name, entries) of `found`, cached by the size and mtime of
+    each file. Uncached distributions are parsed in one process pool and imported
+    by up to `jobs` children at once; `introspect` adds what importing exports."""
+    jobs = jobs or os.cpu_count() or 1
+    params = (min_shingles, k, introspect, sys.version)
+    paths = [_cache_path(n, e, params) if cache else None for n, e in found]
+    out = [_load(p) if p is not None else None for p in paths]
+    todo = [i for i, got in enumerate(out) if got is None]
+    flat = [(i, e) for i in todo for e in found[i][1]]
+    parsed = defaultdict(list)
+    each = (
+        index_each([e for _, e in flat], "index", jobs, min_shingles, k, progress)
+        if flat
+        else []
     )
-    if path is not None:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as f:
-                pickle.dump(out, f, pickle.HIGHEST_PROTOCOL)
-            os.replace(f.name, path)
-        except OSError as e:
-            warnings.warn(f"pysayme: cannot cache index of {name}: {e}")
+    for (i, _), r in zip(flat, each):
+        parsed[i].append(r)
+    groups = [(i, g) for i in todo for g in runtime.units(found[i][1])]
+    got = (
+        runtime.collect_all([g for _, g in groups], jobs, progress=progress)
+        if introspect and groups
+        else []
+    )
+    collected = defaultdict(dict)
+    for (i, _), g in zip(groups, got):
+        collected[i].update(g)
+    for i in todo:
+        name, entries = found[i]
+        rt = runtime.resolve(entries, collected[i]) if introspect else ({}, [])
+        out[i] = Index(*_concat(parsed[i]), *rt)
+        if paths[i] is not None:
+            _store(paths[i], name, out[i])
     return out
+
+
+def dist_index(name, **kw):
+    """Index of installed distribution `name`; None when it is not installed."""
+    entries = dist_files(name)
+    return None if entries is None else build([(name, entries)], **kw)[0]
 
 
 def reexports(modules):
@@ -294,15 +327,14 @@ def _publish(items, best):
 def indexes(dists, **kw):
     """Index of each installed distribution of `dists`; names not installed are
     warned and skipped."""
-    out = []
-    off = not kw.get("progress", True)
-    for name in tqdm(dists, desc="dependencies", unit="dist", leave=False, disable=off):
-        got = dist_index(name, **kw)
-        if got is None:
+    found = []
+    for name in dists:
+        entries = dist_files(name)
+        if entries is None:
             warnings.warn(f"pysayme: distribution {name!r} is not installed")
         else:
-            out.append(got)
-    return out
+            found.append((name, entries))
+    return build(found, **kw)
 
 
 def naming(idx):
