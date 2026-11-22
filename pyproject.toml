@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling>=1.26", "hatch-vcs>=0.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pysayme"
+dynamic = ["version"]
+description = "Find project code that duplicates functions or constants its dependencies already export"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Josh Bailey" }]
+keywords = ["duplication", "clone-detection", "pytest", "ast", "lint"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "numpy>=1.26",
+    "packaging>=23",
+    "pytest>=7.4",
+    "scipy>=1.11",
+    "tqdm>=4.66",
+]
+
+[project.urls]
+Homepage = "https://github.com/anarkiwi/pysayme"
+Issues = "https://github.com/anarkiwi/pysayme/issues"
+
+[project.scripts]
+pysayme = "pysayme.cli:main"
+
+[project.entry-points.pytest11]
+pysayme = "pysayme.plugin"
+
+[dependency-groups]
+dev = [
+    "black==26.10.1",
+    "build==1.6.1",
+    "pylint==4.1.4",
+    "pytest-cov==7.1.0",
+    "pytest-xdist==3.8.0",
+]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pysayme"]
+
+[tool.pytest.ini_options]
+addopts = "-p no:pysayme -n auto --cov=pysayme --cov-report=term-missing --cov-fail-under=85"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["pysayme"]
+parallel = true
+
+[tool.pylint.main]
+source-roots = ["src"]
+
+[tool.pylint.design]
+max-attributes = 16
+
+[tool.pylint."messages control"]
+disable = ["missing-function-docstring", "too-many-arguments", "too-many-positional-arguments", "too-many-locals"]
+
+[tool.pysayme]
+roots = ["src"]
