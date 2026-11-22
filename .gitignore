@@ -1,0 +1,9 @@
+.work/
+.worktrees/
+untracked/
+__pycache__/
+*.egg-info/
+.coverage
+coverage.xml
+dist/
+build/

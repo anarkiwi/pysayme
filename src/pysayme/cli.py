@@ -1,0 +1,75 @@
+"""Command line: ``pysayme check`` (the gate) and ``pysayme rank`` (semantic leads)."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+from . import __version__, gate, semantic, sources
+from .config import load_config
+
+COMMANDS = ("check", "rank")
+
+
+def _common(p):
+    p.add_argument("--config", default="pyproject.toml", help="pyproject.toml to read")
+    p.add_argument("--dist", nargs="+", dest="dists", help="installed distributions")
+    p.add_argument("--jobs", type=int, help="indexing processes (default: all CPUs)")
+    p.add_argument("roots", nargs="*", help="project directories or files")
+
+
+def parser():
+    ap = argparse.ArgumentParser(
+        prog="pysayme",
+        description="Find project code that duplicates its dependencies' code.",
+    )
+    ap.add_argument("--version", action="version", version=__version__)
+    sub = ap.add_subparsers(dest="command", required=True)
+    c = sub.add_parser("check", help="report duplicates; exit 1 if any are new")
+    _common(c)
+    c.add_argument("--copy", type=float, help="Jaccard threshold for a copy")
+    c.add_argument("--inlined", type=float, help="containment threshold for inlining")
+    c.add_argument("--private", action="store_true", default=None)
+    c.add_argument("--no-cache", dest="cache", action="store_false", default=None)
+    c.add_argument("--all", action="store_true", help="include allowlisted matches")
+    r = sub.add_parser("rank", help="rank library look-alikes of project functions")
+    _common(r)
+    r.add_argument("--depth", type=int, default=2, help="library call depth")
+    r.add_argument("--top", type=int, default=3)
+    r.add_argument("--min-score", type=float, default=0.3)
+    return ap
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] not in COMMANDS + ("-h", "--help", "--version"):
+        argv.insert(0, "check")
+    a = parser().parse_args(argv)
+    over = {k: getattr(a, k, None) for k in ("dists", "jobs", "copy", "inlined")}
+    over.update(private=getattr(a, "private", None), cache=getattr(a, "cache", None))
+    cfg = load_config(a.config, roots=a.roots or None, **over)
+    if not cfg.dists:
+        print("pysayme: no dependencies to check against", file=sys.stderr)
+        return 2
+    if a.command == "rank":
+        files = sources.project_files(cfg.roots, cfg.base, cfg.exclude)
+        lib, proj, background = semantic.corpus(cfg.dists, files, a.depth)
+        ranks = semantic.ranked(lib, proj, background, a.top)
+        for key, hits in sorted(ranks.items()):
+            hits = [h for h in hits if h[0] >= a.min_score]
+            if hits:
+                print(key)
+                for score, lk in hits:
+                    print(f"  {score:.2f} {lk}")
+        return 0
+    result = gate.check(cfg)
+    shown = result.found if a.all else result.new
+    for line in sorted(shown.values()):
+        print(line)
+    if result.stale or result.unreasoned:
+        print(str(gate.Result({}, {}, result.stale, result.unreasoned)))
+    return 0 if result.ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

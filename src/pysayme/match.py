@@ -1,0 +1,204 @@
+"""Matching project functions and constants against a dependency index.
+
+Both function relations imply a share >= ``min(copy, inlined)`` of the library
+function's shingles occurs in the project function, so candidates come from library
+prefix filtering (rarest shingles first) and are scored exactly with sparse products.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+
+import numpy as np
+from scipy import sparse
+
+from .extract import Func
+
+COPY = 0.45
+INLINED = 0.70
+MIN_INLINED = 30
+CHUNK = 1 << 18
+
+
+@dataclass
+class Match:
+    """A project function that duplicates a dependency function."""
+
+    project: Func
+    library: Func
+    kind: str
+    score: float
+    rivals: int = 1
+
+    def key(self):
+        return f"{self.project.path}:{self.project.qualname} -> {self.library.qualname}"
+
+    def __str__(self):
+        verb = "duplicates" if self.kind == "copy" else "inlines"
+        return (
+            f"{self.project.where()} {self.project.qualname} {verb} "
+            f"{self.library.qualname} ({self.library.where()}) score={self.score:.2f}"
+        )
+
+
+def _incidence(sets, vocab):
+    """CSR row-per-set 0/1 matrix over the sorted column vocabulary `vocab`."""
+    sizes = np.fromiter((len(s) for s in sets), np.int64, len(sets))
+    indptr = np.zeros(len(sets) + 1, np.int64)
+    np.cumsum(sizes, out=indptr[1:])
+    cols = np.searchsorted(vocab, np.concatenate(sets))
+    data = np.ones(len(cols), np.float32)
+    m = sparse.csr_matrix((data, cols, indptr), shape=(len(sets), len(vocab)))
+    return m, sizes
+
+
+def _prefix(m, sizes, rank, threshold):
+    """Rows of `m` cut to their first tokens in `rank` order: enough that any set
+    holding ``>= threshold * size`` of a row's tokens holds one of them."""
+    rows = np.repeat(np.arange(m.shape[0]), sizes)
+    order = np.lexsort((rank[m.indices], rows))
+    pos = np.arange(len(order)) - m.indptr[rows]
+    keep = pos < (sizes - np.ceil(threshold * sizes - 1e-9) + 1)[rows]
+    sel = order[keep]
+    return sparse.csr_matrix((m.data[sel], (rows[sel], m.indices[sel])), shape=m.shape)
+
+
+def _overlap(p, lib, pi, li):
+    """|p row ∩ lib row| of each pair, in bounded-memory chunks."""
+    out = np.empty(len(pi), np.float64)
+    for lo in range(0, len(pi), CHUNK):
+        sl = slice(lo, lo + CHUNK)
+        prod = p[pi[sl]].multiply(lib[li[sl]])
+        out[sl] = np.asarray(prod.sum(axis=1)).ravel()
+    return out
+
+
+def _join(project, library, copy, inlined, min_inlined):
+    """(project index, library index, inlined?, score) of every qualifying pair.
+
+    Candidates share a token in both prefixes (Jaccard) or in the library prefix
+    (containment), the AllPairs bounds; a length filter precedes exact scoring."""
+    psets = [f.shingles for f in project]
+    lsets = [f.shingles for f in library]
+    vocab = np.unique(np.concatenate(psets + lsets))
+    p, psize = _incidence(psets, vocab)
+    lib, lsize = _incidence(lsets, vocab)
+    df = np.bincount(p.indices, minlength=len(vocab))
+    df += np.bincount(lib.indices, minlength=len(vocab))
+    rank = np.empty(len(vocab), np.int64)
+    rank[np.lexsort((np.arange(len(vocab)), df))] = np.arange(len(vocab))
+    big = sparse.diags((lsize >= min_inlined).astype(np.float32))
+    cand = _prefix(p, psize, rank, copy) @ _prefix(lib, lsize, rank, copy).T
+    cand = cand + p @ (big @ _prefix(lib, lsize, rank, inlined)).T
+    cand = cand.tocoo()
+    pi, li = cand.row, cand.col
+    ps, ls = psize[pi], lsize[li]
+    fits = ((ls >= copy * ps) & (copy * ls <= ps)) | (
+        (ls >= min_inlined) & (inlined * ls <= ps)
+    )
+    pi, li = pi[fits], li[fits]
+    shared = _overlap(p, lib, pi, li)
+    jac = shared / (psize[pi] + lsize[li] - shared)
+    inl = shared / lsize[li]
+    is_copy = jac >= copy
+    is_inl = ~is_copy & (inl >= inlined) & (lsize[li] >= min_inlined)
+    ok = is_copy | is_inl
+    return pi[ok], li[ok], is_inl[ok], np.where(is_inl, inl, jac)[ok]
+
+
+def _rivals(pi, li, library, n):
+    """Per project function, the number of distinct library shingle sets matched."""
+    shapes = {}
+    shape = np.fromiter(
+        (shapes.setdefault(f.shingles.tobytes(), len(shapes)) for f in library),
+        np.int64,
+        len(library),
+    )
+    pairs = np.unique(np.stack([pi, shape[li]]), axis=1)[0]
+    return np.bincount(pairs, minlength=n)
+
+
+def find(
+    project,
+    library,
+    copy=COPY,
+    inlined=INLINED,
+    min_inlined=MIN_INLINED,
+    private=False,
+    ambiguous=False,
+):
+    """Best library match of each project Func that has one, best score first.
+
+    *copy*: shingle-set Jaccard >= `copy`. *inlined*: a share >= `inlined` of a
+    library function's shingles (it having >= `min_inlined`) is in the project one.
+    Only public matches unless `private`; only unambiguous ones unless `ambiguous`."""
+    if not project or not library:
+        return []
+    pi, li, is_inl, score = _join(project, library, copy, inlined, min_inlined)
+    rivals = _rivals(pi, li, library, len(project))
+    if not private:
+        public = np.fromiter((f.public for f in library), bool, len(library))[li]
+        pi, li, is_inl, score = pi[public], li[public], is_inl[public], score[public]
+    order = np.lexsort((li, -score, ~is_inl, pi))
+    rows, first = np.unique(pi[order], return_index=True)
+    first = order[first]
+    if not ambiguous:
+        keep = rivals[rows] == 1
+        rows, first = rows[keep], first[keep]
+    out = [
+        Match(project[i], library[j], "inlined" if k else "copy", float(s), int(r))
+        for i, j, k, s, r in zip(
+            rows, li[first], is_inl[first], score[first], rivals[rows]
+        )
+    ]
+    return sorted(out, key=lambda m: (-m.score, m.key()))
+
+
+def canonical(v):
+    """Hashable, order-insensitive form of a literal value."""
+    if isinstance(v, dict):
+        items = ((canonical(k), canonical(x)) for k, x in v.items())
+        return ("dict", tuple(sorted(items, key=repr)))
+    if isinstance(v, (tuple, list)):
+        return ("tuple", tuple(canonical(x) for x in v))
+    if isinstance(v, (set, frozenset)):
+        return ("set", tuple(sorted(map(canonical, v), key=repr)))
+    return (type(v).__name__, v)
+
+
+def _progression(v):
+    """Whether `v` is a tuple of ints in arithmetic progression: a ``range``."""
+    if not (
+        isinstance(v, tuple)
+        and v
+        and all(isinstance(x, int) and not isinstance(x, bool) for x in v)
+    ):
+        return False
+    return len(set(np.diff(v).tolist())) <= 1
+
+
+def _name(c):
+    return c.qualname.rsplit(":", 1)[-1]
+
+
+def find_constants(project, library, private=False):
+    """(project Const, library Const) pairs: the same public name bound to the same
+    value, or the same collection of 3+ items (not a range) under any name."""
+    by_name, by_value = defaultdict(list), defaultdict(list)
+    for c in library:
+        name = _name(c)
+        if not private and (name.startswith("_") or not c.public):
+            continue
+        v = canonical(c.value)
+        by_name[name, v].append(c)
+        if isinstance(c.value, (tuple, dict)) and len(c.value) >= 3:
+            if not _progression(c.value):
+                by_value[v].append(c)
+    out = []
+    for c in project:
+        v = canonical(c.value)
+        hits = by_name.get((_name(c), v)) or by_value.get(v)
+        if hits:
+            out.append((c, hits[0]))
+    return out
