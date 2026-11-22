@@ -5,7 +5,7 @@
 `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests:
 
 - **lint**: `black --check` and `pylint` over `src` and `tests`.
-- **test**: `pytest`, with xdist and coverage of at least 85%, on Python 3.11–3.14.
+- **test**: `pytest`, with xdist and coverage of at least 85%, on Python 3.12–3.14.
   pysayme's own `[tool.pysayme]` table makes the suite gate pysayme against its
   own dependencies.
 - **build**: builds the sdist and wheel, runs `twine check --strict`, and runs the
