@@ -29,6 +29,7 @@ class Config:
     shingle: int = extract.K
     private: bool = False
     ambiguous: bool = False
+    self_join: bool = True
     jobs: int = 0
     cache: bool = True
     progress: bool = True
@@ -111,6 +112,7 @@ _KEYS = {
     for f in fields(Config)
     if f.name not in ("base", "progress")
 }
+_KEYS["self"] = _KEYS.pop("self-join")
 
 
 def load_config(pyproject="pyproject.toml", **overrides):

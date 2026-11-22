@@ -31,6 +31,13 @@ def parser():
     c.add_argument("--inlined", type=float, help="containment threshold for inlining")
     c.add_argument("--private", action="store_true", default=None)
     c.add_argument("--no-cache", dest="cache", action="store_false", default=None)
+    c.add_argument(
+        "--no-self",
+        dest="self_join",
+        action="store_false",
+        default=None,
+        help="do not report duplicates within the project",
+    )
     c.add_argument("--all", action="store_true", help="include allowlisted matches")
     r = sub.add_parser("rank", help="rank library look-alikes of project functions")
     _common(r)
@@ -46,7 +53,7 @@ def main(argv=None):
         argv.insert(0, "check")
     a = parser().parse_args(argv)
     over = {k: getattr(a, k, None) for k in ("dists", "jobs", "copy", "inlined")}
-    over.update(private=getattr(a, "private", None), cache=getattr(a, "cache", None))
+    over.update({k: getattr(a, k, None) for k in ("private", "cache", "self_join")})
     cfg = load_config(a.config, roots=a.roots or None, **over)
     if not cfg.dists:
         print("pysayme: no dependencies to check against", file=sys.stderr)

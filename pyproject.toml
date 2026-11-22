@@ -77,3 +77,6 @@ disable = ["missing-function-docstring", "too-many-arguments", "too-many-positio
 
 [tool.pysayme]
 roots = ["src"]
+
+[tool.pysayme.allow]
+"src/pysayme/extract.py:constants -> src/pysayme/extract.py:functions" = "parallel extractors of different node kinds sharing only the qualname scaffold"

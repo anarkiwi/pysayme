@@ -107,6 +107,7 @@ def test_load_config_keys_and_overrides(tmp_path):
         roots = ["src"]
         copy = 0.5
         min-shingles = 20
+        self = false
         [tool.pysayme.allow]
         "k -> v" = "reason"
         """,
@@ -114,6 +115,7 @@ def test_load_config_keys_and_overrides(tmp_path):
     cfg = load_config(path, copy=None, inlined=0.9, dists=["b"])
     assert (cfg.base, cfg.roots, cfg.dists) == (tmp_path, ["src"], ["b"])
     assert (cfg.copy, cfg.inlined, cfg.min_shingles) == (0.5, 0.9, 20)
+    assert not cfg.self_join and load_config(path, self_join=True).self_join
     assert cfg.allow == {"k -> v": "reason"}
     assert config.has_section(path)
     assert not config.has_section(tmp_path / "missing.toml")
