@@ -73,6 +73,7 @@ pysayme rank --top 3                      # rank shape-independent look-alikes
 | `self` | `true` | also match project functions against each other |
 | `jobs` | all CPUs | indexing processes |
 | `cache` | `true` | cache dependency indexes (`$PYSAYME_CACHE`, else `~/.cache/pysayme`) |
+| `introspect` | `true` | import dependencies' public modules in a child process to find their public names (`--no-introspect`) |
 
 When `dists` and `requirements` are both unset, pysayme uses the installed
 `[project]` dependencies and extras, falling back to `requirements.txt`.

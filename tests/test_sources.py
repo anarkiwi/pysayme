@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from conftest import write_tree
-from pysayme import sources
+from pysayme import extract, sources
 
 
 def test_dist_files(site):
@@ -15,6 +15,14 @@ def test_dist_files(site):
         ("fakelib/fakelib/_core.py", "fakelib._core"),
         ("fakelib/fakelib/_hidden.py", "fakelib._hidden"),
         ("fakelib/fakelib/util.py", "fakelib.util"),
+        ("fakelib/fakelib/stars.py", "fakelib.stars"),
+        ("fakelib/fakelib/_star.py", "fakelib._star"),
+        ("fakelib/fakelib/lazy/__init__.py", "fakelib.lazy"),
+        ("fakelib/fakelib/lazy/__init__.pyi", "fakelib.lazy"),
+        ("fakelib/fakelib/lazy/_impl.py", "fakelib.lazy._impl"),
+        ("fakelib/fakelib/dyn.py", "fakelib.dyn"),
+        ("fakelib/fakelib/_dyn.py", "fakelib._dyn"),
+        ("fakelib/fakelib/ext.py", "fakelib.ext"),
     }
     assert all(p.is_relative_to(site) for p, _, _ in sources.dist_files("fakelib"))
     assert sources.dist_files("no-such-dist-pysayme") is None
@@ -26,6 +34,9 @@ def test_dist_files_without_record(tmp_path, monkeypatch):
         {
             "toplib/__init__.py": "X = 1\n",
             "toplib/sub/m.py": "Y = 2\n",
+            "toplib/sub/m.pyi": "Y: int\n",
+            "toplib/sub/conftest.py": "",
+            "toplib/sub/m.pyc": "",
             "toplib/tests/test_t.py": "Z = 3\n",
             "topmod.py": "W = 4\n",
             "toplib-1.0.dist-info/METADATA": "Metadata-Version: 2.1\nName: toplib\n"
@@ -38,6 +49,7 @@ def test_dist_files_without_record(tmp_path, monkeypatch):
     assert got == {
         ("toplib/toplib/__init__.py", "toplib"),
         ("toplib/toplib/sub/m.py", "toplib.sub.m"),
+        ("toplib/toplib/sub/m.pyi", "toplib.sub.m"),
         ("toplib/topmod.py", "topmod"),
     }
 
@@ -46,13 +58,20 @@ def test_dist_files_without_record(tmp_path, monkeypatch):
 def test_dist_index_cache(cache, monkeypatch):
     first = sources.dist_index("fakelib", jobs=1, progress=False)
     (pkl,) = cache.glob("fakelib-*.pkl")
-    names = sorted(f.qualname for f in first[0])
+    names = sorted(f.qualname for f in first.funcs)
     assert names == [
         "fakelib._core:accumulate",
         "fakelib._core:transform",
+        "fakelib._dyn:dynamic",
         "fakelib._hidden:secret",
+        "fakelib._star:starred",
+        "fakelib._star:unlisted",
+        "fakelib.ext:len_impl",
+        "fakelib.lazy._impl:stubbed",
         "fakelib.util:helper",
     ]
+    assert first.exports[("fakelib._dyn", "dynamic")] == {"fakelib.dyn"}
+    assert first.compiled == []
 
     def boom(*a, **k):
         raise AssertionError("re-indexed despite cache")
@@ -89,13 +108,13 @@ def test_index_files_parallel_equals_serial(monkeypatch):
 
     def key(out):
         return [sorted((x.qualname, x.path) for x in part) for part in out[:2]] + [
-            sorted(out[2])
+            sorted(m.name for m in out[2])
         ]
 
     serial = sources.index_files(entries, "s", jobs=1, progress=False)
     monkeypatch.setattr(sources, "PARALLEL_MIN_FILES", 2)
     assert key(sources.index_files(entries, "p", jobs=2)) == key(serial)
-    assert len(serial[0]) == 12
+    assert len(serial[0]) == 27
 
 
 def test_index_file_unparsable(tmp_path):
@@ -123,6 +142,71 @@ def test_public_paths():
     }
 
 
+def test_public_paths_ties_runtime_and_owner():
+    reexp = [
+        ("q.b", "q.c", "t", "t"),
+        ("q.a", "q.c", "t", "t"),
+        ("q.z", "q._p", "u", "u"),
+        ("q.y", "q._p", "u", "u"),
+        ("other", "q.c", "v", "v"),
+        ("mine", "_impl.m", "w", "w"),
+        ("vendor", "q._p", "x", "x"),
+    ]
+    exports = {("q._r", "r"): {"q.s.t", "q.s"}, ("q._p", "x"): {"q.k.l"}}
+    owner = {"vendor": 1}
+    assert sources.public_paths(reexp, exports, owner) == {
+        ("q._p", "u"): "q.y",
+        ("q._r", "r"): "q.s",
+        ("q._p", "x"): "q.k.l",
+        ("_impl.m", "w"): "mine",
+    }
+
+
+def record(name, imports=(), stars=(), bound=(), all_names=None, all_from=()):
+    return extract.Module(
+        name,
+        tuple(imports),
+        tuple(stars),
+        frozenset(bound),
+        None if all_names is None else frozenset(all_names),
+        tuple(all_from),
+    )
+
+
+def test_reexports():
+    mods = [
+        record(
+            "p", [("p._a", "f", "f"), ("p._a", "g", "g")], ["p._s"], ["f", "g"], ["f"]
+        ),
+        record("p._s", stars=["p._t", "missing"], bound=["s"]),
+        record("p._t", bound=["t", "u"], all_names=["t"], all_from=["p._u"]),
+        record("p._u", bound=["v"]),
+        record("p.cyc", stars=["p.cyc2"], bound=["c"]),
+        record("p.cyc2", stars=["p.cyc"], bound=["d"]),
+        record("p.lazy", bound=["x"]),
+        record("p.lazy", [("p.lazy._i", "y", "y")], all_names=["y"]),
+    ]
+    got = set(sources.reexports(mods))
+    assert got == {
+        ("p", "p._a", "f", "f"),
+        ("p._s", "p._t", "t", "t"),
+        ("p._s", "p._t", "v", "v"),
+        ("p.cyc", "p.cyc2", "d", "d"),
+        ("p.cyc", "p.cyc2", "c", "c"),
+        ("p.cyc2", "p.cyc", "c", "c"),
+        ("p.cyc2", "p.cyc", "d", "d"),
+        ("p.lazy", "p.lazy._i", "y", "y"),
+    }
+
+
+def test_index_file_stub(tmp_path):
+    stub = tmp_path / "__init__.pyi"
+    stub.write_text("from ._x import f as f\nBIG = (1, 5, 9)\n")
+    funcs, consts, (info,) = sources.index_file((stub, "d/__init__.pyi", "pkg"))
+    assert (funcs, consts) == ([], [])
+    assert info.imports == (("pkg._x", "f", "f"),)
+
+
 @pytest.mark.usefixtures("site")
 def test_library_index():
     with pytest.warns(UserWarning, match="not installed"):
@@ -136,7 +220,15 @@ def test_library_index():
         "fakelib:COLORS": True,
         "fakelib:TIMEOUT": True,
         "fakelib:STEPS": True,
+        "fakelib.stars:starred": True,
+        "fakelib._star:unlisted": False,
+        "fakelib.lazy:stubbed": True,
+        "fakelib.dyn:dynamic": True,
+        "fakelib.ext:len_impl": False,
     }
+    funcs, _ = sources.library_index(["fakelib"], introspect=False, progress=False)
+    assert {f.qualname: f.public for f in funcs}["fakelib._dyn:dynamic"] is False
+    assert sources.compiled_callables(["fakelib"], progress=False) == []
 
 
 LAYOUT = {

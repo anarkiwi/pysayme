@@ -3,7 +3,7 @@
 import pytest
 
 from conftest import KEYS, UNRELATED
-from pysayme import Config, check, load_config, report
+from pysayme import Config, check, load_config, report, runtime
 from pysayme.cli import main
 
 
@@ -103,3 +103,14 @@ def test_cli_rank(project, capsys):
     assert ranks["proj/mod.py:grid_of"][0] == "fakelib._hidden:secret"
     assert set(ranks) == {"proj/mod.py:pipeline", "proj/mod.py:grid_of"}
     assert all(len(v) <= 2 for v in ranks.values())
+
+
+def test_cli_no_introspect(project, capsys, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("introspected")
+
+    monkeypatch.setattr(runtime, "introspect", boom)
+    cfg = str(project / "pyproject.toml")
+    assert main(["--config", cfg, "--no-introspect"]) == 1
+    assert len(capsys.readouterr().out.splitlines()) == len(KEYS)
+    assert main(["rank", "--config", cfg, "--no-introspect"]) == 0

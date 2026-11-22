@@ -25,7 +25,9 @@ def report(cfg):
         "k": cfg.shingle,
         "progress": cfg.progress,
     }
-    lib_funcs, lib_consts = sources.library_index(cfg.dists, cache=cfg.cache, **kw)
+    lib_funcs, lib_consts = sources.library_index(
+        cfg.dists, cache=cfg.cache, introspect=cfg.introspect, **kw
+    )
     files = sources.project_files(cfg.roots, cfg.base, cfg.exclude)
     proj_funcs, proj_consts, _ = sources.index_files(files, "project", **kw)
     matches = find(

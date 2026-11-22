@@ -85,4 +85,25 @@ function matches are false positives or private-API look-alikes:
 What remains is `DOWN = 3`, at two sites, matching `matplotlib.sankey:DOWN`. It is a
 C4FM dibit level, so it belongs in the allowlist.
 
-Runtime of `pysayme check` on 2 CPUs: 22 s with a cold cache, 8 s warm.
+With public-API resolution (`*` imports, computed `__all__`, `.pyi` stubs and runtime
+introspection), every runtime-exported function of `scipy.signal` (132),
+`scipy.ndimage`, `scipy.special`, `scipy.interpolate` and `skimage.measure` is public
+under its documented path. Examples are `scipy.signal:find_peaks`,
+`scipy.signal:welch`, `scipy.signal:firwin`, `scipy.ndimage:uniform_filter1d`,
+`scipy.ndimage:label` and `numpy.fft:fftfreq`. The 852 numba functions registered
+with `@overload`, `@lower_builtin` and similar decorators are no longer public.
+
+Making `scipy.linalg:solve_banded` public exposed `fm._refined` as a match. Its
+2-statement body is shared by `solve_banded`, `cho_solve`, `cho_solve_banded` and
+`lu_solve`, so the name-aware shape count makes it ambiguous. The findings are the
+same as without public-API resolution: the two `DOWN` sites.
+
+Runtime of `pysayme check` on 2 CPUs:
+
+| | Cold cache | Warm cache |
+|---|---|---|
+| with introspection | 34 s | 6 s |
+| `--no-introspect` | 17 s | 6 s |
+
+On gravity-inversion, introspection takes a cold run from 2.5 s to 5.4 s. Warm runs
+take 1.1 s either way, and the findings above are unchanged.

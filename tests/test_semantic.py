@@ -96,6 +96,11 @@ def test_ranked_finds_counterparts(project):
         "fakelib:transform",
         "fakelib:helper",
         "fakelib._hidden:secret",
+        "fakelib._star:unlisted",
+        "fakelib.dyn:dynamic",
+        "fakelib.ext:overload",
+        "fakelib.lazy:stubbed",
+        "fakelib.stars:starred",
     }
     ranks = semantic.ranked(lib, proj, background, top=2, min_info=0)
     assert ranks["proj/mod.py:mysum"][0][1] == "fakelib:accumulate"

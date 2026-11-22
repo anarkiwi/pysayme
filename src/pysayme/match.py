@@ -119,11 +119,16 @@ def _join(project, library, copy, inlined, min_inlined):
     return pi[ok], li[ok], is_inl[ok], np.where(is_inl, inl, jac)[ok]
 
 
-def _rivals(pi, li, library, n):
-    """Per project function, the number of distinct library shingle sets matched."""
+def _rivals(pi, li, library, n, callees=True):
+    """Per project function, the number of distinct shapes matched: a shingle set,
+    with the free names its body references when `callees`, so copies count once
+    and one template forwarding to different callees counts per callee."""
     shapes = {}
     shape = np.fromiter(
-        (shapes.setdefault(f.shingles.tobytes(), len(shapes)) for f in library),
+        (
+            shapes.setdefault((f.shingles.tobytes(), callees and f.free), len(shapes))
+            for f in library
+        ),
         np.int64,
         len(library),
     )
@@ -190,7 +195,7 @@ def find_self(
     pi, li, is_inl, score = _join(funcs, funcs, copy, inlined, min_inlined)
     keep = ~_nested(funcs, pi, li)
     pi, li, is_inl, score = pi[keep], li[keep], is_inl[keep], score[keep]
-    rivals = _rivals(pi, li, funcs, len(funcs))
+    rivals = _rivals(pi, li, funcs, len(funcs), callees=False)
     rank = np.empty(len(funcs), np.int64)
     rank[np.lexsort(([f.qualname for f in funcs], [f.path for f in funcs]))] = (
         np.arange(len(funcs))

@@ -6,8 +6,9 @@ set and cosine similarity. It uses no regular expressions.
 ## Index
 
 Indexing covers every `.py` file of each named installed distribution, except test
-directories and `__main__.py`. Distributions installed without a file list (editable
-installs) are found through their top-level import packages.
+directories, `conftest.py` and `__main__.py`. Its `.pyi` stubs are read for
+re-exports only. Distributions installed without a file list (editable installs) are
+found through their top-level import packages.
 
 Each function body is normalized as follows:
 - its docstring is dropped;
@@ -21,22 +22,74 @@ is stored as a sorted unique `uint64` array.
 Module-level `NAME = literal` assignments are indexed as constants. Lists and sets
 are canonicalized as sorted tuples.
 
-A distribution's index is cached in a pickle. The cache key covers the index
-parameters and the size and mtime of every file in the distribution, so upgrading or
+A distribution's index is cached in a pickle, together with its runtime exports and
+compiled callables (see below). The cache key covers the index parameters, the Python
+version, and the size and mtime of every file in the distribution, so upgrading or
 editing a dependency re-indexes it.
 
 ## Public names
 
-`from M import name` statements at module level are recorded, including those in
-`if TYPE_CHECKING:` and `try` blocks, and filtered by `__all__` when the module
-defines one. Each definition is named by the shortest public module that re-exports
-it, directly or through a chain. For example, `jennings.coverage._core:call` is
-reported as `jennings.coverage:call`.
+A definition's public name is the import path a user would write. pysayme finds the
+modules that export each definition in two ways, and merges them.
+
+**Statically**, each module (and its `.pyi` stub, such as a lazy loader's
+`__init__.pyi`) records its module-level imports, including those in `if` and `try`
+blocks:
+- `from M import name` re-exports `name`;
+- `from M import *` binds what `M` exports;
+- `__all__` is evaluated from literals, `X.__all__` references, `+`, `+=`,
+  `.extend`, `.append`, `list(...)` and `.copy()`. Any other value, such as
+  `[s for s in dir() ...]`, makes it unknown.
+
+A module exports its `__all__`, or, when that is absent or unknown, its public bound
+names, including those bound by `*` imports. `*` imports and `X.__all__` references
+are resolved across modules as a fixed point, so import cycles resolve too. A
+re-export counts only when the exporter exports that name.
+
+**At runtime** (`introspect = true`), each public module of a distribution is
+imported in a spawned child process. A module is public when no component of its path
+is `_private`. For each name the module exports (its `__all__`, else its public
+names), pysayme takes `inspect.unwrap(obj)` and finds the definition:
+- functions by `__code__.co_filename` and `co_qualname`, so a `__module__` that
+  names a re-exporting module does not mislead it;
+- classes by their first Python method's code, else `__module__` and `__qualname__`.
+
+The export is recorded when the definition is one of the distribution's own and is
+exported under its own name. Constants are named by the static pass alone. Each import has a timeout (`runtime.IMPORT_TIMEOUT`).
+A module that times out or kills its child is skipped, and a fresh child continues
+with the next. Library output and warnings are discarded.
+
+The runtime pass also records an inventory of the public callables that have no
+Python source: ufuncs, builtins, and Cython or Rust functions. Each is recorded with
+its public path, type name, `inspect.signature` text (when available) and the first
+docstring line, under the shortest path that exports it.
+`sources.compiled_callables(dists)` returns this inventory.
+
+**Merging.** An exporter counts only when it is in the definition's own distribution
+and its own top-level package. The exception is a private top-level package, such as
+`_pytest`, whose definitions any package of the same distribution can export. This
+keeps `pylab` or a dependent library from renaming another package's API. Each
+definition is named by the shortest public module among its own module and the
+modules that export it, directly or through a chain. Ties go to its own module, then
+to the lexicographically first. For example, `jennings.coverage._core:call` is
+reported as `jennings.coverage:call`, and `scipy.signal._peak_finding:find_peaks` as
+`scipy.signal:find_peaks`.
 
 A definition is public when:
 - its qualified name has no `_private` component;
 - it is not nested in a function;
-- its module path, after re-export resolution, has no private component.
+- it is not registered (see below);
+- its module path, after renaming, has no private component.
+
+**Registration is not API.** A def or class decorated with a registry decorator,
+bare (`@intrinsic`) or called (`@overload(np.sum)`, `@registry.lower_cast(...)`), is
+an implementation handed to a registry, not a name users call. Such a definition is
+not public, and neither is anything nested in it. A decorator is a registry
+decorator when its callee's last name is in `extract.REGISTRATIONS`. These are the
+numba extension API names: `overload*`, `intrinsic`, `type_callable`, `infer*`,
+`lower*`, `box`, `unbox` and `register_model`. `register_jitable` is not one of them,
+because its functions remain callable from Python. A bare `@overload` is
+`typing.overload` on a bodiless stub, which is too small to index either way.
 
 Only public definitions are reported unless `private = true`.
 
@@ -62,8 +115,14 @@ pairs whose sizes cannot qualify, and the surviving candidates are scored exactl
 with chunked sparse row products.
 
 A project function is reported only when its qualifying pairs identify a single
-library shape. The shape count is taken over all indexed code, private included.
-Library functions with identical shingle sets count as one shape. A generic shape,
+library shape. The shape count is taken over all indexed code, private included. A
+shape is a shingle set together with the free names its body references: the globals
+and callees it loads but never binds. Normalization collapses those names, so this
+restores the one distinction that matters for identity. Vendored or renamed copies of a
+function therefore count once, while one template forwarding to different callees
+counts once per callee. For example, scipy's `solve_banded`, `cho_solve`,
+`cho_solve_banded` and `lu_solve` are each a two-statement unpack-and-forward wrapper
+around a different private helper. A generic shape,
 such as a two-line wrapper that unpacks a tuple and forwards it to a call, matches
 many library functions, so it carries no evidence of copying any one of them.
 `ambiguous = true` reports these matches too.
@@ -84,7 +143,10 @@ Tests are held to the same rule as other code: copied tests are reported, and th
 is a shared helper or `pytest.mark.parametrize`.
 
 The ambiguity rule applies as it does for library matches. A copy pair is reported
-only when each side matches a single other project shape. An inlined pair is reported
+only when each side matches a single other project shape. Here a shape is the shingle
+set alone: bodies that differ only in the callees they forward to are one repeated
+template, fixed by a shared helper or `parametrize`. Library matching counts callees
+because it must name the one function to call. An inlined pair is reported
 only when the inlining function contains a single shape.
 
 ## Constant matching

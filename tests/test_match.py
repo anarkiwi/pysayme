@@ -111,6 +111,7 @@ def test_find_selection():
         "lib",
         [True, True, True, True, False],
     )
+    lib[1].qualname = "vendored.copy:f0"
     proj = funcs(
         [a, np.concatenate([b[:20], r(3000, 3010), b[20:30]]), c, r(9000, 9040)],
         "proj",
@@ -129,6 +130,8 @@ def test_find_selection():
     assert every["proj:f1"].rivals == 2
     assert every["proj:f2"].library.qualname == "lib:f4"
     assert match.find([], lib) == [] and match.find(proj, []) == []
+    lib[1].qualname = "lib:other"
+    assert "proj:f0" in {m.project.qualname for m in match.find(proj, lib)}
 
 
 def test_find_inlined():
@@ -232,3 +235,21 @@ def test_find_constants():
         ("SECRET", "lib:_SECRET"),
         ("HIDDEN", "lib._m:HIDDEN"),
     }
+
+
+def test_shape_counts_free_names():
+    a = np.arange(0, 40)
+    lib = funcs([a, a.copy()], "lib")
+    proj = funcs([a.copy()], "proj")
+    assert [m.rivals for m in match.find(proj, lib)] == [1]
+    lib[1].free = 1
+    assert not match.find(proj, lib)
+    assert [m.rivals for m in match.find(proj, lib, ambiguous=True)] == [2]
+
+
+def test_self_join_template_ignores_callees():
+    a = np.arange(0, 40)
+    fs = funcs([a, a.copy(), a.copy()], "p")
+    for i, f in enumerate(fs):
+        f.path, f.free = f"m{i}.py", i
+    assert len(match.find_self(fs)) == 3
