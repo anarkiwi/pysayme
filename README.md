@@ -1,8 +1,8 @@
 # pysayme
 
-Finds project code that duplicates functions or constants that the project's own
-installed dependencies already export, and fails a pytest test naming the library
-function to call instead.
+Manage agentic code bloat - finds project code that duplicates functions or constants
+that the project's own installed dependencies already export, and fails a pytest test
+naming the library function to call instead.
 
 Clone detectors such as pylint R0801, jscpd and PMD CPD compare a project with itself,
 and they compare text. pysayme compares a project with its dependencies, and it
