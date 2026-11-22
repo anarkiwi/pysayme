@@ -74,6 +74,13 @@ def test_join_matches_brute_force(seed):
     assert got.keys() == want.keys()
     for key, (kind, s) in want.items():
         assert got[key][0] == kind and got[key][1] == pytest.approx(s)
+    pi, li, inl, _ = match._join(  # pylint: disable=protected-access
+        funcs(psets, "p"), funcs(psets, "p"), copy, inlined, min_inlined
+    )
+    got = {(int(i), int(j)): bool(k) for i, j, k in zip(pi, li, inl)}
+    assert got == {
+        k: v[0] for k, v in brute(psets, psets, copy, inlined, min_inlined).items()
+    }
 
 
 def test_join_boundaries():
@@ -132,6 +139,46 @@ def test_find_inlined():
     assert (m.kind, m.score) == ("inlined", 0.75)
     assert " inlines " in str(m)
     assert match.find(proj, lib, min_inlined=41) == []
+
+
+def test_find_self():
+    r = np.arange
+    a, b, c, d, e, f, g = (r(k * 1000, k * 1000 + 40) for k in range(7))
+    sets = {
+        "b.py:g": a,
+        "a.py:f": a.copy(),
+        "c.py:outer": b,
+        "c.py:outer.inner": b.copy(),
+        "e.py:big": np.concatenate([c, r(10000, 10100)]),
+        "d.py:h": c[:35],
+        "tests/test_x.py:test_a": d,
+        "tests/test_y.py:Case.test_b": d.copy(),
+        "tests/test_x.py:helper": e[:35],
+        "tests/test_y.py:test_c": np.concatenate([e, r(11000, 11100)]),
+        "tests/test_x.py:test_d": f,
+        "tests/test_y.py:test_e": np.concatenate([f, r(12000, 12100)]),
+        "g.py:w": g,
+        "h.py:p": np.concatenate([g[:30], r(7000, 7010)]),
+        "h.py:q": np.concatenate([g[10:], r(8000, 8010)]),
+    }
+    fs = [Func(q.partition(":")[2], q.partition(":")[0], 1, s) for q, s in sets.items()]
+    found = match.find_self(fs)
+    assert [(m.key(), m.kind) for m in found] == [
+        ("a.py:f -> b.py:g", "copy"),
+        ("d.py:h -> e.py:big", "inlined"),
+        ("tests/test_x.py:helper -> tests/test_y.py:test_c", "inlined"),
+        ("tests/test_x.py:test_a -> tests/test_y.py:Case.test_b", "copy"),
+        ("tests/test_x.py:test_d -> tests/test_y.py:test_e", "inlined"),
+    ]
+    assert str(found[0]) == "a.py:1 f duplicates b.py:1 g score=1.00"
+    assert str(found[1]) == "d.py:1 h is inlined in e.py:1 big score=1.00"
+    every = {m.key(): m for m in match.find_self(fs, ambiguous=True)}
+    assert set(every) - {m.key() for m in found} == {
+        "g.py:w -> h.py:p",
+        "g.py:w -> h.py:q",
+    }
+    assert every["g.py:w -> h.py:p"].rivals == 2
+    assert match.find_self([]) == []
 
 
 def test_canonical():

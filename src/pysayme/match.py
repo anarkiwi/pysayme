@@ -1,4 +1,4 @@
-"""Matching project functions and constants against a dependency index.
+"""Matching project functions and constants against dependencies, and each other.
 
 Both function relations imply a share >= ``min(copy, inlined)`` of the library
 function's shingles occurs in the project function, so candidates come from library
@@ -30,11 +30,23 @@ class Match:
     kind: str
     score: float
     rivals: int = 1
+    local: bool = False
+
+    def _target(self):
+        lib = self.library
+        return f"{lib.path}:{lib.qualname}" if self.local else lib.qualname
 
     def key(self):
-        return f"{self.project.path}:{self.project.qualname} -> {self.library.qualname}"
+        return f"{self.project.path}:{self.project.qualname} -> {self._target()}"
 
     def __str__(self):
+        if self.local:
+            verb = "duplicates" if self.kind == "copy" else "is inlined in"
+            return (
+                f"{self.project.where()} {self.project.qualname} {verb} "
+                f"{self.library.where()} {self.library.qualname} "
+                f"score={self.score:.2f}"
+            )
         verb = "duplicates" if self.kind == "copy" else "inlines"
         return (
             f"{self.project.where()} {self.project.qualname} {verb} "
@@ -153,6 +165,53 @@ def find(
         )
     ]
     return sorted(out, key=lambda m: (-m.score, m.key()))
+
+
+def _nested(funcs, pi, li):
+    """Whether each pair is one function and itself, or one nested in the other."""
+    out = pi == li
+    for n in np.flatnonzero(~out):
+        a, b = funcs[pi[n]], funcs[li[n]]
+        if a.path == b.path:
+            qa, qb = a.qualname + ".", b.qualname + "."
+            out[n] = qa.startswith(qb) or qb.startswith(qa)
+    return out
+
+
+def find_self(
+    funcs, copy=COPY, inlined=INLINED, min_inlined=MIN_INLINED, ambiguous=False
+):
+    """Project Funcs duplicating other project Funcs, by path then qualname.
+
+    One self-join: each copy pair once, each inlined pair as (helper, inliner). Only
+    pairs whose copying sides each match one shape, unless `ambiguous`."""
+    if not funcs:
+        return []
+    pi, li, is_inl, score = _join(funcs, funcs, copy, inlined, min_inlined)
+    keep = ~_nested(funcs, pi, li)
+    pi, li, is_inl, score = pi[keep], li[keep], is_inl[keep], score[keep]
+    rivals = _rivals(pi, li, funcs, len(funcs))
+    rank = np.empty(len(funcs), np.int64)
+    rank[np.lexsort(([f.qualname for f in funcs], [f.path for f in funcs]))] = (
+        np.arange(len(funcs))
+    )
+    keep = is_inl | (rank[pi] < rank[li])
+    if not ambiguous:
+        keep &= (rivals[pi] == 1) & (is_inl | (rivals[li] == 1))
+    a, b = np.where(is_inl, li, pi), np.where(is_inl, pi, li)
+    sel = np.flatnonzero(keep)
+    sel = sel[np.lexsort((rank[b[sel]], rank[a[sel]]))]
+    return [
+        Match(
+            funcs[a[n]],
+            funcs[b[n]],
+            "inlined" if is_inl[n] else "copy",
+            float(score[n]),
+            int(rivals[pi[n]]),
+            True,
+        )
+        for n in sel
+    ]
 
 
 def canonical(v):

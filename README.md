@@ -1,12 +1,12 @@
 # pysayme
 
 Manage agentic code bloat by finding project code that duplicates functions or constants
-that the project's own installed dependencies already export, and fails a pytest test
-naming the library function to call instead.
+that the project's own installed dependencies already export, or other functions of the
+project, and fails a pytest test naming the function to call instead.
 
-Clone detectors such as pylint R0801, jscpd and PMD CPD compare a project with itself,
-and they compare text. pysayme compares a project with its dependencies, and it
-compares normalized AST structure, so renamed copies still match.
+Clone detectors such as pylint R0801, jscpd and PMD CPD compare text. pysayme compares
+normalized AST structure, so renamed copies still match, and it compares a project
+with its dependencies as well as with itself.
 
 ## Install
 
@@ -26,12 +26,14 @@ roots = ["src", "tests"]
 
 [tool.pysayme.allow]
 "src/app/util.py:runs -> somelib.masks:runs" = "why this copy is deliberate"
+"tools/a.py:f -> tools/b.py:g" = "why these two stay apart"
 ```
 
 A full `pytest` run (no path arguments) then includes one `pyproject.toml::pysayme`
 item. The item fails if any of these hold:
 
 - project code duplicates a public dependency function or constant;
+- a project function duplicates, or is inlined in, another project function;
 - an allowlist entry no longer matches (so the list only shrinks);
 - an allowlist entry has no reason.
 
@@ -47,6 +49,7 @@ item. The item fails if any of these hold:
 pysayme                                   # check, using pyproject.toml
 pysayme --dist numpy scipy -- src tests   # explicit dependencies and roots
 pysayme check --all                       # include allowlisted matches
+pysayme check --no-self                   # skip duplicates within the project
 pysayme rank --top 3                      # rank shape-independent look-alikes
 ```
 
@@ -61,12 +64,13 @@ pysayme rank --top 3                      # rank shape-independent look-alikes
 | `requirements` | | requirements file(s) to take `dists` from |
 | `extra-dists`, `ignore-dists` | `[]` | add to / remove from the discovered `dists` |
 | `exclude` | `[]` | `fnmatch` globs of project paths to skip |
-| `allow` | `{}` | `"path:qualname -> module:qualname"` keys mapped to reasons |
+| `allow` | `{}` | `"path:qualname -> module:qualname"` (or `-> path:qualname`) keys mapped to reasons |
 | `copy` | `0.45` | shingle Jaccard for a copy |
 | `inlined` | `0.70` | share of a library function found inside a project one |
 | `min-shingles`, `min-inlined` | `12`, `30` | smallest function compared, and smallest one inlined |
 | `private` | `false` | also match private library code |
-| `ambiguous` | `false` | also report matches that fit several library functions |
+| `ambiguous` | `false` | also report matches that fit several functions |
+| `self` | `true` | also match project functions against each other |
 | `jobs` | all CPUs | indexing processes |
 | `cache` | `true` | cache dependency indexes (`$PYSAYME_CACHE`, else `~/.cache/pysayme`) |
 

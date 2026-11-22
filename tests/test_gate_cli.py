@@ -2,7 +2,7 @@
 
 import pytest
 
-from conftest import KEYS
+from conftest import KEYS, UNRELATED
 from pysayme import Config, check, load_config, report
 from pysayme.cli import main
 
@@ -18,6 +18,24 @@ def test_report_on_project(project):
     assert "redefines fakelib:COLORS" in found["proj/mod.py:PALETTE -> fakelib:COLORS"]
     cfg.private = True
     assert set(report(cfg)) - KEYS == {"proj/mod.py:grid_of -> fakelib._hidden:secret"}
+
+
+def test_report_self(project, capsys):
+    copy = UNRELATED.replace("def unrelated(", "def elsewhere(")
+    (project / "proj" / "other.py").write_text(copy)
+    cfg = load_config(project / "pyproject.toml", progress=False)
+    key = "proj/mod.py:unrelated -> proj/other.py:elsewhere"
+    found = report(cfg)
+    assert set(found) - KEYS == {key}
+    assert found[key] == (
+        "proj/mod.py:1 unrelated duplicates proj/other.py:2 elsewhere score=1.00"
+    )
+    assert "call one from the" in str(check(cfg, found))
+    cfg.self_join = False
+    assert set(report(cfg)) == KEYS
+    args = ["--config", str(project / "pyproject.toml"), "--no-self"]
+    assert main(args) == 1
+    assert "elsewhere" not in capsys.readouterr().out
 
 
 def test_check():

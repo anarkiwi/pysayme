@@ -68,6 +68,25 @@ such as a two-line wrapper that unpacks a tuple and forwards it to a call, match
 many library functions, so it carries no evidence of copying any one of them.
 `ambiguous = true` reports these matches too.
 
+## Project self-join
+
+With `self = true`, the project is also joined with itself by the same exact join, with
+the same `copy`, `inlined` and `min-inlined` thresholds. Each reported pair names both
+project locations, keyed `path:qualname -> path:qualname`:
+- a copy pair is reported once, the side first by path then qualname on the left;
+- an inlined pair is keyed from the inlined helper to the function that inlines it.
+
+These pairs are dropped:
+- a function paired with itself;
+- a function paired with a function nested in it.
+
+Tests are held to the same rule as other code: copied tests are reported, and the fix
+is a shared helper or `pytest.mark.parametrize`.
+
+The ambiguity rule applies as it does for library matches. A copy pair is reported
+only when each side matches a single other project shape. An inlined pair is reported
+only when the inlining function contains a single shape.
+
 ## Constant matching
 
 A project constant matches when either of these holds:

@@ -5,19 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import sources
-from .match import find, find_constants
+from .match import find, find_constants, find_self
 
 HOW = """\
 Each line above is project code that duplicates code in an installed dependency.
 Delete the copy and import/call the dependency's version. If the dependency's version
 is not quite right, change the call site, or the dependency, rather than keep a copy.
-Only if the duplication is deliberate, add its key to [tool.pysayme.allow] in
-pyproject.toml with the reason as the value."""
+A line naming two project locations is a copy within the project: call one from the
+other, or move it to a module both import. Only if the duplication is deliberate, add
+its key to [tool.pysayme.allow] in pyproject.toml with the reason as the value."""
 
 
 def report(cfg):
     """{allowlist key: message} of every project function and constant that
-    duplicates one in `cfg.dists`."""
+    duplicates one in `cfg.dists`, and, if `cfg.self_join`, another project one."""
     kw = {
         "jobs": cfg.jobs or None,
         "min_shingles": cfg.min_shingles,
@@ -36,6 +37,10 @@ def report(cfg):
         cfg.private,
         cfg.ambiguous,
     )
+    if cfg.self_join:
+        matches += find_self(
+            proj_funcs, cfg.copy, cfg.inlined, cfg.min_inlined, cfg.ambiguous
+        )
     out = {m.key(): str(m) for m in matches}
     for p, lib in find_constants(proj_consts, lib_consts, cfg.private):
         out[f"{p.path}:{p.qualname} -> {lib.qualname}"] = (
