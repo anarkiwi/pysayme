@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 
 import numpy as np
 from scipy import sparse
@@ -179,21 +178,13 @@ def _nested(funcs, pi, li):
     return out
 
 
-def _test_item(f):
-    """Whether pytest collects `f` as a test by default."""
-    name = PurePosixPath(f.path).name
-    in_test_file = name.startswith("test_") or name.endswith("_test.py")
-    return in_test_file and f.qualname.rsplit(".", 1)[-1].startswith("test")
-
-
 def find_self(
     funcs, copy=COPY, inlined=INLINED, min_inlined=MIN_INLINED, ambiguous=False
 ):
     """Project Funcs duplicating other project Funcs, by path then qualname.
 
-    One self-join: each copy pair once, each inlined pair as (helper, inliner); no test
-    function is a helper or a copy of a test. Only pairs whose copying sides each match
-    one shape, unless `ambiguous`."""
+    One self-join: each copy pair once, each inlined pair as (helper, inliner). Only
+    pairs whose copying sides each match one shape, unless `ambiguous`."""
     if not funcs:
         return []
     pi, li, is_inl, score = _join(funcs, funcs, copy, inlined, min_inlined)
@@ -204,8 +195,7 @@ def find_self(
     rank[np.lexsort(([f.qualname for f in funcs], [f.path for f in funcs]))] = (
         np.arange(len(funcs))
     )
-    test = np.fromiter(map(_test_item, funcs), bool, len(funcs))
-    keep = np.where(is_inl, ~test[li], (rank[pi] < rank[li]) & ~(test[pi] & test[li]))
+    keep = is_inl | (rank[pi] < rank[li])
     if not ambiguous:
         keep &= (rivals[pi] == 1) & (is_inl | (rivals[li] == 1))
     a, b = np.where(is_inl, li, pi), np.where(is_inl, pi, li)

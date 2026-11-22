@@ -167,6 +167,8 @@ def test_find_self():
         ("a.py:f -> b.py:g", "copy"),
         ("d.py:h -> e.py:big", "inlined"),
         ("tests/test_x.py:helper -> tests/test_y.py:test_c", "inlined"),
+        ("tests/test_x.py:test_a -> tests/test_y.py:Case.test_b", "copy"),
+        ("tests/test_x.py:test_d -> tests/test_y.py:test_e", "inlined"),
     ]
     assert str(found[0]) == "a.py:1 f duplicates b.py:1 g score=1.00"
     assert str(found[1]) == "d.py:1 h is inlined in e.py:1 big score=1.00"

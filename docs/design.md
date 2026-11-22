@@ -78,16 +78,14 @@ project locations, keyed `path:qualname -> path:qualname`:
 
 These pairs are dropped:
 - a function paired with itself;
-- a function paired with a function nested in it;
-- pairs where no side is a reuse target. A pytest test function (`test*` in
-  `test_*.py` or `*_test.py`) is never an inlined helper, and two test functions are
-  never a copy pair. Tests built from one template share their scaffolding and differ
-  in data, and one test cannot call another.
+- a function paired with a function nested in it.
+
+Tests are held to the same rule as other code: copied tests are reported, and the fix
+is a shared helper or `pytest.mark.parametrize`.
 
 The ambiguity rule applies as it does for library matches. A copy pair is reported
 only when each side matches a single other project shape. An inlined pair is reported
-only when the inlining function contains a single shape. Shapes are counted before
-the test-function rule, so a test still counts as evidence that a shape is generic.
+only when the inlining function contains a single shape.
 
 ## Constant matching
 
