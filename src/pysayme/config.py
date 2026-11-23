@@ -30,6 +30,7 @@ class Config:
     private: bool = False
     ambiguous: bool = False
     self_join: bool = True
+    behaviour: bool = False
     jobs: int = 0
     cache: bool = True
     introspect: bool = True

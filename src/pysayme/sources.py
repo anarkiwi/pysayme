@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from . import extract, runtime
 
-INDEX_VERSION = 7
+INDEX_VERSION = 8
 SOURCE_SUFFIXES = (".py", ".pyi")
 PARALLEL_MIN_FILES = 64
 _SKIP_DIRS = frozenset(("tests", "test", "testing", "__pycache__"))
@@ -85,13 +85,16 @@ def dist_files(name):
 
 class Index(NamedTuple):
     """One distribution's functions, constants, Module records, runtime exports
-    {(module, name): exporting modules} and compiled public callables."""
+    {(module, name): exporting modules}, compiled public callables, public
+    callables that can be probed, and its cache key."""
 
     funcs: list
     consts: list
     modules: list
     exports: dict
     compiled: list
+    callables: list
+    key: str | None
 
 
 def index_file(entry, min_shingles=12, k=extract.K):
@@ -160,12 +163,13 @@ def _cache_key(name, entries, params):
     return h.hexdigest()
 
 
-def _cache_path(name, entries, params):
-    key = _cache_key(name, entries, params)
-    return cache_dir() / f"{metadata.distribution(name).metadata['Name']}-{key}.pkl"
+def canonical(name):
+    """The installed distribution `name`'s own spelling of its name."""
+    return metadata.distribution(name).metadata["Name"]
 
 
-def _load(path):
+def load(path):
+    """The object pickled at `path`, or None."""
     try:
         with open(path, "rb") as f:
             return pickle.load(f)
@@ -173,14 +177,15 @@ def _load(path):
         return None
 
 
-def _store(path, name, index):
+def save(path, obj):
+    """Pickle `obj` to `path` atomically, warning when it cannot."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as f:
-            pickle.dump(index, f, pickle.HIGHEST_PROTOCOL)
+            pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
         os.replace(f.name, path)
     except OSError as e:
-        warnings.warn(f"pysayme: cannot cache index of {name}: {e}")
+        warnings.warn(f"pysayme: cannot cache {path.name}: {e}")
 
 
 def build(
@@ -193,12 +198,16 @@ def build(
     introspect=True,
 ):
     """Index of each (name, entries) of `found`, cached by the size and mtime of
-    each file. Uncached distributions are parsed in one process pool and imported
-    by up to `jobs` children at once; `introspect` adds what importing exports."""
+    each file. Uncached distributions are parsed in one process pool and their
+    public modules imported by `jobs` workers; `introspect` adds what they export."""
     jobs = jobs or os.cpu_count() or 1
     params = (min_shingles, k, introspect, sys.version)
-    paths = [_cache_path(n, e, params) if cache else None for n, e in found]
-    out = [_load(p) if p is not None else None for p in paths]
+    keys = [_cache_key(n, e, params) if cache else None for n, e in found]
+    paths = [
+        cache_dir() / f"{canonical(n)}-{key}.pkl" if key else None
+        for (n, _), key in zip(found, keys)
+    ]
+    out = [load(p) if p is not None else None for p in paths]
     todo = [i for i, got in enumerate(out) if got is None]
     flat = [(i, e) for i in todo for e in found[i][1]]
     parsed = defaultdict(list)
@@ -209,21 +218,25 @@ def build(
     )
     for (i, _), r in zip(flat, each):
         parsed[i].append(r)
-    groups = [(i, g) for i in todo for g in runtime.units(found[i][1])]
-    got = (
-        runtime.collect_all([g for _, g in groups], jobs, progress=progress)
-        if introspect and groups
-        else []
+    modules = sorted(
+        {m for i in todo for m in runtime.public_modules(found[i][1])}
+        if introspect
+        else ()
     )
-    collected = defaultdict(dict)
-    for (i, _), g in zip(groups, got):
-        collected[i].update(g)
+    collected = (
+        runtime.collect(modules, progress=progress, jobs=jobs) if modules else {}
+    )
     for i in todo:
-        name, entries = found[i]
-        rt = runtime.resolve(entries, collected[i]) if introspect else ({}, [])
-        out[i] = Index(*_concat(parsed[i]), *rt)
+        entries = found[i][1]
+        own = {m for _, _, m in entries}
+        rt = (
+            runtime.resolve(entries, {m: v for m, v in collected.items() if m in own})
+            if introspect
+            else ({}, [], [])
+        )
+        out[i] = Index(*_concat(parsed[i]), *rt, keys[i])
         if paths[i] is not None:
-            _store(paths[i], name, out[i])
+            save(paths[i], out[i])
     return out
 
 
@@ -350,7 +363,12 @@ def naming(idx):
 def library_index(dists, **kw):
     """Concatenated (functions, constants) of the installed distributions `dists`,
     named by their public import path."""
-    idx = indexes(dists, **kw)
+    return publish(indexes(dists, **kw))
+
+
+def publish(idx):
+    """Concatenated (functions, constants) of the Index list `idx`, named by their
+    public import path."""
     best = naming(idx)
     funcs = [f for i in idx for f in i.funcs]
     consts = [c for i in idx for c in i.consts]

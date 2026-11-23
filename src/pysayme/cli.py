@@ -45,6 +45,12 @@ def parser():
         default=None,
         help="do not report duplicates within the project",
     )
+    c.add_argument(
+        "--behaviour",
+        action="store_true",
+        default=None,
+        help="also run functions to find ones behaving like library callables",
+    )
     c.add_argument("--all", action="store_true", help="include allowlisted matches")
     r = sub.add_parser("rank", help="rank library look-alikes of project functions")
     _common(r)
@@ -60,7 +66,8 @@ def main(argv=None):
         argv.insert(0, "check")
     a = parser().parse_args(argv)
     over = {k: getattr(a, k, None) for k in ("dists", "jobs", "copy", "inlined")}
-    over.update({k: getattr(a, k, None) for k in ("private", "cache", "self_join")})
+    flags = ("private", "cache", "self_join", "behaviour")
+    over.update({k: getattr(a, k, None) for k in flags})
     over["introspect"] = a.introspect
     cfg = load_config(a.config, roots=a.roots or None, **over)
     if not cfg.dists:

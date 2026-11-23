@@ -18,6 +18,12 @@ def pytest_addoption(parser):
         help="check for code duplicating dependencies even when tests are selected",
     )
     group.addoption(
+        "--pysayme-behaviour",
+        action="store_true",
+        default=None,
+        help="also gate on functions behaving like dependency callables",
+    )
+    group.addoption(
         "--no-pysayme",
         action="store_true",
         default=False,
@@ -57,7 +63,9 @@ class GateItem(pytest.Item):
         self.add_marker("pysayme")
 
     def runtest(self):
-        result = gate.check(_config.load_config(self.path, progress=False))
+        behaviour = self.config.option.pysayme_behaviour
+        cfg = _config.load_config(self.path, progress=False, behaviour=behaviour)
+        result = gate.check(cfg)
         if not result.ok:
             raise GateFailure(str(result))
 

@@ -78,7 +78,7 @@ def test_dist_index_cache(cache, monkeypatch):
 
     with monkeypatch.context() as m:
         m.setattr(sources, "index_each", boom)
-        m.setattr(sources.runtime, "collect_all", boom)
+        m.setattr(sources.runtime, "collect", boom)
         assert sorted(f.qualname for f in sources.dist_index("fakelib")[0]) == names
     pkl.write_bytes(b"garbage")
     assert sorted(f.qualname for f in sources.dist_index("fakelib")[0]) == names

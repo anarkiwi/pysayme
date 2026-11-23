@@ -107,3 +107,71 @@ Runtime of `pysayme check` on 2 CPUs:
 
 On gravity-inversion, introspection takes a cold run from 2.5 s to 5.4 s. Warm runs
 take 1.1 s either way, and the findings above are unchanged.
+
+## Behavioural fingerprinting
+
+Both projects were checked with `pysayme check --behaviour --jobs 2`, pinned to 2
+CPUs.
+
+### sigmfalyzer (4e23871)
+
+The run used the discovered dependencies plus `fastcrc`, which sigmfalyzer only
+reaches transitively, so it needs `extra-dists = ["fastcrc"]`. This gave about 5,500
+library callables, compiled ones included, and 1,378 project functions. Findings:
+
+| Project | Behaves like | Judgement |
+|---|---|---|
+| `elrs_stream.py:crc8` | `fastcrc.crc8:dvb_s2` | true; Rust, invisible to shape matching |
+| `frsky.py:chip_crc` | `fastcrc.crc16:cms` | true |
+| `frames.py:cc2500_crc`, `frames.py:afhds2a_crc` | `fastcrc.crc16:cms`, `:spi_fujitsu` | true; deliberate test oracles, allowlist |
+| `tests/test_elrs.py:bitwise_crc8` | `fastcrc.crc8:dvb_s2` | true; deliberate oracle, allowlist |
+| `backend.py:uniform_filter1d` | `scipy.ndimage:uniform_filter1d(mode='wrap')` | true; array-API backend wrapper, allowlist |
+| `backend.py:_hann` | `scipy.signal.windows:hann(sym=False)` | true; backend, allowlist |
+| `bits.py:popcount` | `numpy:bitwise_count` | true; numpy 2 only while the floor is 1.26, allowlist |
+| `extract.py:_sinc` | `numpy:sinc` | true; written out to match the C++, allowlist |
+| `signalling.py:_energy` | `sklearn.utils.extmath:squared_norm` | true; deliberately avoids BLAS |
+| `analysis.py:_offsets` | `pandas.core.arrays.categorical:coerce_indexer_dtype` | equal on the probe domain (both cast the first argument to integers); unrelated |
+| `tests/test_classify.py:_inside` | `pymavlink.mavexpression:demix1` | equal on finite inputs (`(a + b) / 2`); unrelated |
+
+These are not caught, for the stated reasons:
+- `wifi_dsss.py:crc16` takes a bit array, and no dependency computes a CRC of bits.
+- `boxer/taps.py:final_taps` equals `firwin` only with a derived tap count and
+  Kaiser beta.
+- `synth.py:gaussian_pulse` equals `windows.gaussian(M, std) / sum` only under a
+  reparametrisation (M, std from sps, bt).
+- `reductions.py:taper` equals `tukey(width, 2 * share)` only for non-default
+  `alpha`, and it is built from `np.hanning` in float32.
+- `wifi.py:_circular_prefix_sum`, `estimators.py:_quantiles` and
+  `fm.py:components` take 2-D arrays.
+- `fm.py:at_least` is the tail of `scipy.stats.poisson_binom`, a distribution
+  object rather than a callable with an array parameter.
+
+Probes are 1-D, and parameters are bound one keyword at a time, so none of these can
+join.
+
+None of the research notes' deliberate near-misses are reported, apart from the
+backend wrappers, `bits.popcount` and the `frames.py` oracles above, which behave
+identically and are allowlist material. `reductions.running` and `reductions.moving`
+are not reported.
+
+The value-dependence and pass-through rules were added after an earlier run. That run
+also reported these, each a coincidence on the probe domain:
+- `hops.readings` as `numpy:divide`, before probes held a zero;
+- `preamble._runs_of` as `scipy.signal:unique_roots`, which passes its input through;
+- `preamble.side_gate` as `scipy.special:entr` up to scale, a normalisation bug with
+  infinities;
+- `tests/test_survey._die` as `pandas.core.common:maybe_make_list`, which wraps its
+  input;
+- `channels.runs` as `matplotlib.cbook:contiguous_regions`.
+
+| sigmfalyzer, 2 CPUs | Cold cache | Warm cache |
+|---|---|---|
+| `check --behaviour` | 200 s | 84 s |
+| `check` | | 11 s |
+
+Warm runs spend their time running the project's functions, which are never cached.
+
+### gravity-inversion
+
+The run probes 641 library callables and 369 project functions, and reports
+nothing. Cold: 19 s; warm: 5.3 s.

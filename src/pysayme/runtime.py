@@ -1,25 +1,33 @@
 """Public names found by importing a distribution's public modules in child
-processes, so library imports cannot pollute, hang or crash the caller."""
+processes, so library imports cannot pollute, hang or crash the caller, and the
+worker pool those children come from."""
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import importlib
 import inspect
 import multiprocessing
 import os
 import sys
+import tempfile
+import threading
 import warnings
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from typing import NamedTuple
 
 from tqdm import tqdm
 
-from . import extract
+from . import extract, probe
 
 IMPORT_TIMEOUT = 60.0
+CHILD_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMBA_NUM_THREADS": "1",
+    "MPLBACKEND": "Agg",
+}
 
 
 class Compiled(NamedTuple):
@@ -30,6 +38,13 @@ class Compiled(NamedTuple):
     kind: str
     signature: str | None
     doc: str
+
+
+class Callable(NamedTuple):
+    """A public callable that can be probed, under its shortest public path."""
+
+    path: str
+    spec: probe.Spec
 
 
 def _first_line(doc):
@@ -86,141 +101,210 @@ def describe(obj):
     )
 
 
+def _spec(rec, obj, module):
+    if rec[0] not in ("def", "compiled"):
+        return None
+    try:
+        return probe.spec(obj, module)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+
+
 def exports(mod):
-    """[(name, record)] of `mod`'s ``__all__``, else its public names."""
+    """[(name, record, probe Spec or None)] of `mod`'s ``__all__``, else its public
+    names."""
     names = getattr(mod, "__all__", None)
     if not isinstance(names, (list, tuple)):
         names = [n for n in vars(mod) if not n.startswith("_")]
     out = []
     for n in names:
         try:
-            rec = describe(getattr(mod, n))
+            obj = getattr(mod, n)
+            rec = describe(obj)
         except Exception:  # pylint: disable=broad-exception-caught
             continue
         if rec is not None and isinstance(n, str):
-            out.append((n, rec))
+            out.append((n, rec, _spec(rec, obj, mod.__name__)))
     return out
 
 
-def _serve(modules, conn):
-    devnull = os.open(os.devnull, os.O_WRONLY)
-    os.dup2(devnull, 1)
-    os.dup2(devnull, 2)
+def module_exports(name):
+    try:
+        return exports(importlib.import_module(name))
+    except BaseException:  # pylint: disable=broad-exception-caught
+        return []
+
+
+def _serve(fn, home, conn):
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
     warnings.simplefilter("ignore")
-    for name in modules:
+    os.chdir(home)
+    while True:
         try:
-            got = exports(importlib.import_module(name))
+            task = conn.recv()
+        except EOFError:
+            break
+        try:
+            out = fn(task)
         except BaseException:  # pylint: disable=broad-exception-caught
-            got = []
-        conn.send(got)
-    conn.close()
+            out = None
+        conn.send(out)
 
 
-def _bar(total, desc, progress):
-    opts = {"desc": desc, "unit": "module", "leave": False, "file": sys.stderr}
-    return tqdm(total=total, disable=not progress, **opts)
+class Workers:
+    """Spawned children, isolated from the caller's output, working directory and
+    thread pools, that run `fn` on tasks. A task whose child dies or overruns its
+    timeout yields None, and a fresh child takes the next task."""
 
+    def __init__(self, fn, jobs=1):
+        self.fn, self.jobs = fn, max(1, jobs or os.cpu_count() or 1)
+        self._ctx = multiprocessing.get_context("spawn")
+        self._home = tempfile.TemporaryDirectory(  # pylint: disable=consider-using-with
+            prefix="pysayme-"
+        )
+        self._lock = threading.Lock()
+        self._idle = []
 
-def collect(modules, timeout=IMPORT_TIMEOUT, desc="import", progress=True, shared=None):
-    """{module: [(name, record)]} of each of `modules` imported in a spawned child;
-    one that times out or kills its child is skipped and a new child continues.
-    Progress goes to the `shared` tqdm bar when given."""
-    ctx = multiprocessing.get_context("spawn")
-    out, pos = {}, 0
-    own = shared is None
-    with (
-        contextlib.nullcontext(shared)
-        if not own
-        else _bar(len(modules), desc, progress)
-    ) as shown:
-        while pos < len(modules):
-            recv, send = ctx.Pipe(duplex=False)
-            child = ctx.Process(target=_serve, args=(modules[pos:], send), daemon=True)
-            child.start()
-            send.close()
+    def _start(self):
+        recv, send = self._ctx.Pipe()
+        args = (self.fn, self._home.name, send)
+        child = self._ctx.Process(target=_serve, args=args, daemon=True)
+        with self._lock:
+            saved = {k: os.environ.get(k) for k in CHILD_ENV}
+            os.environ.update(CHILD_ENV)
             try:
-                while pos < len(modules) and recv.poll(timeout):
-                    out[modules[pos]] = recv.recv()
-                    pos += 1
-                    shown.update()
-            except EOFError:
-                pass
-            if pos < len(modules):
-                pos += 1
+                child.start()
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k)
+                    else:
+                        os.environ[k] = v
+        send.close()
+        return child, recv
+
+    @staticmethod
+    def _stop(worker):
+        worker[0].kill()
+        worker[0].join()
+        worker[1].close()
+
+    def map(self, tasks, timeout, desc="work", progress=True, unit="task"):
+        """[result or None] of each of `tasks`; `timeout` is seconds, or a function
+        of the task giving them."""
+        tasks = list(tasks)
+        out = [None] * len(tasks)
+        todo = iter(enumerate(tasks))
+        limit = timeout if callable(timeout) else lambda _: timeout
+        opts = {"desc": desc, "unit": unit, "leave": False, "file": sys.stderr}
+
+        def lane(shown):
+            with self._lock:
+                worker = self._idle.pop() if self._idle else None
+                item = next(todo, None)
+            while item is not None:
+                worker = worker or self._start()
+                try:
+                    worker[1].send(item[1])
+                    done = worker[1].poll(limit(item[1]))
+                    if done:
+                        out[item[0]] = worker[1].recv()
+                except (EOFError, OSError):
+                    done = False
+                if not done:
+                    self._stop(worker)
+                    worker = None
                 shown.update()
-            child.kill()
-            child.join()
-            recv.close()
-    return out
+                with self._lock:
+                    item = next(todo, None)
+            if worker is not None:
+                with self._lock:
+                    self._idle.append(worker)
+
+        with tqdm(total=len(tasks), disable=not progress, **opts) as shown:
+            lanes = [
+                threading.Thread(target=lane, args=(shown,))
+                for _ in range(min(self.jobs, len(tasks)))
+            ]
+            for t in lanes:
+                t.start()
+            for t in lanes:
+                t.join()
+        return out
+
+    def close(self):
+        for worker in self._idle:
+            self._stop(worker)
+        self._idle = []
+        self._home.cleanup()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
 
-def units(entries):
-    """The public modules of (path, display, module) `entries`, grouped by top-level
-    subpackage (``scipy.signal``): each group is imported by one child."""
-    groups = defaultdict(list)
-    for m in sorted({m for _, _, m in entries}):
-        if m and not extract.private_module(m):
-            groups[".".join(m.split(".", 2)[:2])].append(m)
-    return list(groups.values())
+def collect(modules, timeout=IMPORT_TIMEOUT, desc="import", progress=True, jobs=1):
+    """{module: [(name, record, spec)]} of each of `modules` imported in a spawned
+    child; one that times out or kills its child is skipped."""
+    with Workers(module_exports, jobs) as pool:
+        got = pool.map(modules, timeout, desc, progress, "module")
+    return {m: g for m, g in zip(modules, got) if g is not None}
 
 
-def collect_all(groups, jobs=1, timeout=IMPORT_TIMEOUT, desc="import", progress=True):
-    """collect() of the module lists `groups` on at most `jobs` children: groups are
-    packed largest first into the least-loaded child, so each child imports a
-    shared base package once. One {module: [(name, record)]} per group."""
-    bins = [[] for _ in range(max(1, min(jobs, len(groups))))]
-    load = [0] * len(bins)
-    for i in sorted(range(len(groups)), key=lambda i: -len(groups[i])):
-        j = load.index(min(load))
-        bins[j].append(i)
-        load[j] += len(groups[i])
-    with _bar(sum(load), desc, progress) as shown:
-        with ThreadPoolExecutor(len(bins)) as pool:
-            got = pool.map(
-                lambda b: collect(
-                    [m for i in b for m in groups[i]], timeout, shared=shown
-                ),
-                bins,
-            )
-            merged = {}
-            for part in got:
-                merged.update(part)
-    return [{m: merged[m] for m in g if m in merged} for g in groups]
+def _rank(path):
+    return path.count("."), path
+
+
+def public_modules(entries):
+    """The public modules of (path, display, module) `entries`, sorted so that
+    modules of one subpackage are imported by the same child in turn."""
+    return sorted({m for _, _, m in entries if m and not extract.private_module(m)})
 
 
 def introspect(entries, timeout=IMPORT_TIMEOUT, desc="import", progress=True, jobs=1):
-    """({(module, name): exporting modules}, [Compiled]) of a distribution's
-    (path, display, module) `entries`: the public modules that bind each of its
-    top-level definitions under its own name, and its compiled public callables."""
-    got = collect_all(units(entries), jobs, timeout, desc, progress)
-    return resolve(entries, {m: v for g in got for m, v in g.items()})
+    """({(module, name): exporting modules}, [Compiled], [Callable]) of a
+    distribution's (path, display, module) `entries`: the public modules that bind
+    each of its top-level definitions under its own name, its compiled public
+    callables, and its public callables that can be probed."""
+    collected = collect(public_modules(entries), timeout, desc, progress, jobs)
+    return resolve(entries, collected)
 
 
 def resolve(entries, collected):
-    """introspect()'s result from `collected` {module: [(name, record)]}."""
+    """introspect()'s result from `collected` {module: [(name, record, spec)]}."""
     files = {os.path.realpath(p): m for p, _, m in entries if str(p).endswith(".py")}
     known = {m for _, _, m in entries}
     tops = {m.split(".", 1)[0] for m in known}
     found = defaultdict(set)
-    compiled = {}
+    compiled, probed = {}, {}
     for mod, items in collected.items():
-        for name, rec in items:
+        for name, rec, spec in items:
+            path = f"{mod}:{name}"
             if rec[0] == "compiled":
                 owner = rec[1]
                 if owner is None or owner.split(".", 1)[0] in tops:
-                    path = f"{mod}:{name}"
-                    ident = rec[1:4]
-                    old = compiled.get(ident)
-                    rank = (path.count("."), path)
-                    if old is None or rank < (old.path.count("."), old.path):
-                        compiled[ident] = Compiled(path, rec[3], rec[4], rec[5])
+                    _keep(compiled, rec[1:4], Compiled(path, *rec[3:]))
+                    _keep(probed, rec[1:4], spec and Callable(path, spec))
                 continue
             if rec[0] == "def":
                 src, qual = files.get(rec[1]), rec[2]
+                if src is not None:
+                    _keep(probed, rec[1:], spec and Callable(path, spec))
             elif rec[3] in files:
                 src, qual = files[rec[3]], rec[4]
             else:
                 src, qual = (rec[1], rec[2]) if rec[1] in known else (None, None)
             if src is not None and qual == name and src != mod:
                 found[src, name].add(mod)
-    return dict(found), sorted(compiled.values())
+    return dict(found), sorted(compiled.values()), sorted(probed.values())
+
+
+def _keep(table, ident, item):
+    """Record `item` under `ident` unless one with a shorter path is there."""
+    old = table.get(ident)
+    if item and (old is None or _rank(item.path) < _rank(old.path)):
+        table[ident] = item
