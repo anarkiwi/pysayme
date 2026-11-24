@@ -4,7 +4,10 @@ Fail on pure-Python code that numpy would do much faster. Same contract as the r
 pysayme: a static finding names the call to use instead, an allowlist entry carries a
 reason, and the list can only shrink.
 
-Status: proposal. Nothing here is implemented.
+Status: prototype. `pysayme vectorize` (the gate) and `pysayme advise` (the ranked
+advisory view) are implemented; the sections below are the design they follow. Not yet
+built: nested-loop broadcasting rewrites (the OUTER finding is a hint), dynamic
+confirmation, and re-weighting `advise` by a measured profile.
 
 ## Why it fits pysayme
 
@@ -194,3 +197,37 @@ allowlist churn.
 - **Is a naive reference a bug?** Oracles are legitimate. The allowlist reason is the
   record; an optional `# pysayme: oracle` pragma would be shorter but would bypass the
   shrink-only guarantee, so I recommend against it.
+
+## `advise`: where to concentrate manual refactoring
+
+`vectorize` only reports what numpy provably replaces. Most of the cost in a real project
+is elsewhere: per-item work over lists and tuples of Python objects that could use every
+core, scalar recurrences numpy cannot express, and algorithmic traps. `pysayme advise`
+ranks all of these and never fails the build.
+
+It reuses the same dependence analysis. A loop whose iterations touch no carried state
+and write no shared state is *independent*; whether that means vectorize or parallelize
+depends on the body:
+
+| Kind | Evidence | Suggested change |
+|---|---|---|
+| VECTORIZE | the proved `vectorize` finding | the numpy call shown |
+| PARALLEL | independent, heavy body (project calls that loop, numpy calls, inner loops) | process pool |
+| CONCURRENT | independent, the body does I/O | threads or asyncio |
+| JIT | carried scalar recurrence over a numeric-only body | numba, or `lfilter` if linear |
+| SERIAL | heavy loop with a carried dependence, named in the message | restructure |
+| MEMBERSHIP | `x in a_list`, `.index`, `.count` inside a loop | set or dict |
+| PAIRWISE | nested loops over the same collection | broadcasting, sort and sweep, KD-tree |
+| LIST_HEAD, STRCAT, REPEATED | `pop(0)`, string `+=`, re-scanning an invariant | deque, `join`, hoist |
+
+Cost is a static proxy: unknown iterables count as 100 items, arrays as 1000, a project
+call that itself loops as 150 operations, I/O as 200, and nested loops multiply. The
+score is 10 x log10(cost x gain / 1000 + 1), so 10 is roughly a thousand operations of
+wasted work and every 10 more is a factor of ten. The outermost eligible loop carries the
+advice; loops inside it are not reported separately.
+
+Caveats the output states or the numbers reflect: independence assumes callees are pure
+(a callee that writes a global or a file is invisible); the "unknown means 100" default
+overstates short lists; and a project that already parallelizes at a higher level will
+see advice there that it has taken. Treat the ranking as where to look first, and confirm
+with a profiler.

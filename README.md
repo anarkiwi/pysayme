@@ -57,6 +57,18 @@ pysayme rank --top 3                      # rank shape-independent look-alikes
 
 `check` exits 1 when there are new duplicates or allowlist problems.
 
+```
+pysayme vectorize                         # fail on loops over ndarrays numpy would replace
+pysayme advise --top 20                   # rank loops worth refactoring; never fails
+pysayme advise --kind PARALLEL JIT        # only some kinds of advice
+```
+
+`vectorize` is a gate: findings use the allowlist like duplicates do (`check --vectorize`,
+`pytest --pysayme-vectorize`). `advise` is a research aid like `rank`: it prints, most
+valuable first, the loops where a manual change pays (vectorize, spread independent
+iterations over cores, JIT a scalar recurrence, or fix an O(n^2) pattern). See
+[docs/vectorize.md](docs/vectorize.md).
+
 ## Configuration
 
 | Key | Default | Meaning |

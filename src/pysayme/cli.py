@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__, gate, semantic, sources, vectorize
+from . import __version__, advise, gate, semantic, sources, vectorize
 from .config import load_config
 
-COMMANDS = ("check", "rank", "vectorize")
+COMMANDS = ("check", "rank", "vectorize", "advise")
 
 
 def _common(p):
@@ -58,6 +58,16 @@ def parser():
         help="also report pure-Python loops that numpy would do faster",
     )
     c.add_argument("--all", action="store_true", help="include allowlisted matches")
+    d = sub.add_parser("advise", help="rank loops worth refactoring (never fails)")
+    _common(d)
+    d.add_argument("--top", type=int, default=20, help="items to show (0: all)")
+    d.add_argument(
+        "--min-score", type=float, default=10.0, help="decibel-style score floor"
+    )
+    d.add_argument("--kind", nargs="+", help="only these kinds, e.g. PARALLEL JIT")
+    d.add_argument(
+        "--min-trip", type=int, help="smallest literal loop length considered"
+    )
     v = sub.add_parser("vectorize", help="report loops that numpy should replace")
     _common(v)
     v.add_argument("--likely", action="store_true", help="include unproved matches")
@@ -69,6 +79,17 @@ def parser():
     r.add_argument("--top", type=int, default=3)
     r.add_argument("--min-score", type=float, default=0.3)
     return ap
+
+
+def _advise(a):
+    cfg = load_config(a.config, roots=a.roots or None, vectorize_min_trip=a.min_trip)
+    files = sources.project_files(cfg.roots, cfg.base, cfg.exclude)
+    found = advise.advise(files, cfg, a.top, a.min_score, tuple(a.kind or ()))
+    for i, item in enumerate(found, 1):
+        print(f"{i:3d}. {item}")
+    if not found:
+        print("pysayme: nothing worth refactoring at this score")
+    return 0
 
 
 def _vectorize(a):
@@ -101,6 +122,8 @@ def main(argv=None):
     over["introspect"] = a.introspect
     if a.command == "vectorize":
         return _vectorize(a)
+    if a.command == "advise":
+        return _advise(a)
     cfg = load_config(a.config, roots=a.roots or None, **over)
     if not cfg.dists:
         print("pysayme: no dependencies to check against", file=sys.stderr)

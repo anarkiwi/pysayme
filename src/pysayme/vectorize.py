@@ -796,17 +796,22 @@ def scan(source, rel, cfg):
     return out
 
 
-def find(files, cfg):
-    """Findings of every (path, rel, _) in `files`, deduplicated by allowlist key and
-    filtered to `cfg.vectorize_confidence`."""
-    out = {}
+def read_sources(files, cfg):
+    """(rel, text) of every readable file of `files` that `cfg.vectorize_exclude` keeps."""
     for path, rel, _ in files:
         if any(fnmatch(rel, p) for p in cfg.vectorize_exclude):
             continue
         try:
-            text = path.read_text(encoding="utf-8")
+            yield rel, path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+
+
+def find(files, cfg):
+    """Findings of every (path, rel, _) in `files`, deduplicated by allowlist key and
+    filtered to `cfg.vectorize_confidence`."""
+    out = {}
+    for rel, text in read_sources(files, cfg):
         for f in scan(text, rel, cfg):
             if f.tier == LIKELY and cfg.vectorize_confidence != LIKELY:
                 continue
