@@ -61,6 +61,7 @@ pysayme rank --top 3                      # rank shape-independent look-alikes
 pysayme vectorize                         # fail on loops over ndarrays numpy would replace
 pysayme advise --top 20                   # rank loops worth refactoring; never fails
 pysayme advise --kind PARALLEL JIT        # only some kinds of advice
+pysayme advise --profile out.prof         # rank by time measured with cProfile
 ```
 
 `vectorize` is a gate: findings use the allowlist like duplicates do (`check --vectorize`,

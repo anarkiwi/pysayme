@@ -21,6 +21,7 @@ import ast
 from collections import defaultdict
 from fnmatch import fnmatch
 
+from . import vecnest
 from .vecexpr import (  # pylint: disable=unused-import
     ARRAY,
     ELEM,
@@ -448,6 +449,10 @@ class _Finder:
         sc = self.sc
         if node.orelse:
             return None
+        if any(isinstance(s, ast.For) for s in node.body):
+            nested = vecnest.rewrite(sc, node, done)
+            if nested:
+                return nested
         src = sc.source(node.iter, node.target)
         if src is None:
             return None

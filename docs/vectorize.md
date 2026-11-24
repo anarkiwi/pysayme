@@ -6,8 +6,8 @@ reason, and the list can only shrink.
 
 Status: prototype. `pysayme vectorize` (the gate) and `pysayme advise` (the ranked
 advisory view) are implemented; the sections below are the design they follow. Not yet
-built: nested-loop broadcasting rewrites (the OUTER finding is a hint), dynamic
-confirmation, and re-weighting `advise` by a measured profile.
+built: dynamic confirmation (running the rewrite against the loop for a speed-up), and
+broadcast rewrites for triangular nests, masks, and nests deeper than the shapes below.
 
 ## Why it fits pysayme
 
@@ -231,3 +231,33 @@ Caveats the output states or the numbers reflect: independence assumes callees a
 overstates short lists; and a project that already parallelizes at a higher level will
 see advice there that it has taken. Treat the ranking as where to look first, and confirm
 with a profiler.
+
+## Nested loops: the broadcast rewrite
+
+A loop nest is rewritten inside-out, after Liu, Liu and Wang, "Vectorizer" (arXiv
+2609.08088): each loop variable becomes an axis, an array indexed by a loop variable is
+sliced to that axis and expanded with `None` axes so it broadcasts, and the body becomes
+one array expression. Two shapes are handled, to any depth:
+
+- `for i..: for j..: out[i, j] = e` (or `out[i][j]`) becomes `out[:, :] = e` over (i, j);
+- `for k..: acc = c; for n..: acc += e; out.append(acc)` (or `out[k] = acc`) becomes a
+  `np.sum(..., axis=-1)` (or `np.prod`) with the seed `c` added back.
+
+Refused, so the loop stays silent: bounds that depend on another axis (triangular
+nests), subscripts using two loop variables at once (`x[i + j]`), axes used out of order
+(a transpose), and any call the translator cannot prove elementwise. Like the paper's, the
+rewrite builds one intermediate array with an element per iteration of the whole nest;
+the message states its shape so a large nest can be chunked by hand. Tests run each
+rewrite against the loop it replaces.
+
+## `advise --profile`: measured time instead of a guess
+
+```
+python -m cProfile -o out.prof -m pytest tests/test_hot_path.py
+pysayme advise --profile out.prof
+```
+
+A pstats file records time per function. `advise` matches each function by file, name and
+definition line, spreads its cumulative time over its advised loops by static cost, and
+scores the result. Functions the profile never saw run are dropped (`--include-unprofiled`
+lists them at score 0). Per-loop times need a line profiler; Scalene output is not read.

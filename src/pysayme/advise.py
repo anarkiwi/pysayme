@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import ast
 import math
+import pstats
+from pathlib import Path
 from collections import defaultdict
 from typing import NamedTuple
 
@@ -80,6 +82,30 @@ ADVICE = {
     "REPEATED": "rescans or re-sorts a loop-invariant collection every iteration: "
     "compute it once, outside the loop",
 }
+
+
+class Profile:  # pylint: disable=too-few-public-methods
+    """Measured time per function, from a pstats file (``python -m cProfile -o out.prof``).
+
+    A pstats file has no per-loop times, so a function's cumulative time is shared among
+    its advised loops by their static cost."""
+
+    def __init__(self, path):
+        stats = pstats.Stats(str(path)).stats  # pylint: disable=no-member
+        self.rows = [
+            (Path(f).as_posix(), line, name, ct, calls)
+            for (f, line, name), (_, calls, _, ct, _) in stats.items()
+        ]
+
+    def find(self, rel, name, lo, hi):
+        """(cumulative seconds, calls) of the function `name` defined on lines lo..hi of
+        `rel`, or None when the profile never saw it run."""
+        hits = [
+            (ct, calls)
+            for f, line, n, ct, calls in self.rows
+            if n == name and lo <= line <= hi and (f == rel or f.endswith("/" + rel))
+        ]
+        return (sum(h[0] for h in hits), sum(h[1] for h in hits)) if hits else None
 
 
 class Advice(NamedTuple):
@@ -212,8 +238,9 @@ def _flow(loop, targets):
 class _Advisor:
     """Advice for one function."""
 
-    def __init__(self, scope, rel, qual, ctx):
+    def __init__(self, scope, rel, qual, ctx, measured=None):
         self.sc, self.rel, self.qual, self.ctx = scope, rel, qual, ctx
+        self.measured, self.fn_cost = measured, None
         self.out, self.marked = [], {}
         self.listish, self.strs = self.containers()
         self.vec = {
@@ -228,7 +255,7 @@ class _Advisor:
         lists, other, strs = set(), set(), set()
         for p in self.sc.params:
             ann = ast.unparse(p.annotation) if p.annotation is not None else ""
-            if ann.split("[")[0].rsplit(".", 1)[-1] in (
+            if ann.split("[", maxsplit=1)[0].rsplit(".", 1)[-1] in (
                 "list",
                 "List",
                 "Sequence",
@@ -388,9 +415,23 @@ class _Advisor:
                 self.walk(subs, chain)
 
     def add(self, node, kind, cost, why, action=None, source=None):
+        score = 10 * math.log10(1 + cost * MULT[kind] / 1000)
+        if self.ctx["profile"] is not None:
+            if self.measured is None:
+                if not self.ctx["keep_unprofiled"]:
+                    return
+                score = 0.0  # no measurement: below everything measured
+                why += "; not seen running in the profile"
+            else:
+                if self.fn_cost is None:
+                    self.fn_cost = max(self.block_cost(self.sc.body), 1.0)
+                seconds, calls = self.measured
+                share = min(1.0, cost / self.fn_cost)
+                score = 10 * math.log10(1 + seconds * share * 1e6 * MULT[kind] / 1000)
+                why += f"; measured {seconds:.3g}s cumulative over {calls} calls in this function"
         self.out.append(
             Advice(
-                self.rel, node.lineno, self.qual, kind, round(10 * math.log10(1 + cost * MULT[kind] / 1000), 1),
+                self.rel, node.lineno, self.qual, kind, round(score, 1),
                 why, action or ADVICE[kind], source or _text(node),
             )
         )  # fmt: skip
@@ -596,7 +637,7 @@ class _Advisor:
                         s,
                         "REPEATED",
                         chain_trip * UNKNOWN_TRIP,
-                        f"`{n.func.id}({a.id})` of a loop-invariant collection, ~{chain_trip} times",
+                        f"`{n.func.id}({a.id})`, loop-invariant, ~{chain_trip} times",
                     )
         if n is s and isinstance(s, ast.AugAssign) and isinstance(s.op, ast.Add):
             if isinstance(s.target, ast.Name) and s.target.id in self.strs:
@@ -673,7 +714,9 @@ def _defs_cost(tree):
     return out
 
 
-def scan(source, rel, cfg, libs=(), serial_cost=50_000):
+def scan(
+    source, rel, cfg, libs=(), serial_cost=50_000, profile=None, keep_unprofiled=False
+):
     """Advice for one file's `source`."""
     try:
         tree = ast.parse(source)
@@ -685,12 +728,15 @@ def scan(source, rel, cfg, libs=(), serial_cost=50_000):
         "defs": _defs_cost(tree),
         "min_trip": cfg.vectorize_min_trip,
         "libs": list(libs),
+        "profile": profile,
+        "keep_unprofiled": keep_unprofiled,
         "serial_cost": serial_cost,
     }
     scope = vectorize._Scope(
         aliases, helpers, cfg, (), tree.body
     )  # pylint: disable=protected-access
-    out = _Advisor(scope, rel, "<module>", ctx).run()
+    module = profile.find(rel, "<module>", 1, 1) if profile else None
+    out = _Advisor(scope, rel, "<module>", ctx, module).run()
     for qual, fn in vectorize._defs(tree.body):  # pylint: disable=protected-access
         if vectorize._decorated(fn, aliases):  # pylint: disable=protected-access
             continue
@@ -698,17 +744,25 @@ def scan(source, rel, cfg, libs=(), serial_cost=50_000):
         sc = vectorize._Scope(
             aliases, helpers, cfg, a.posonlyargs + a.args + a.kwonlyargs, fn.body
         )  # pylint: disable=protected-access
-        out += _Advisor(sc, rel, qual, ctx).run()
+        first = min([d.lineno for d in fn.decorator_list] + [fn.lineno])
+        measured = profile.find(rel, fn.name, first, fn.lineno) if profile else None
+        out += _Advisor(sc, rel, qual, ctx, measured).run()
     return out
 
 
-def advise(files, cfg, top=20, min_score=10.0, kinds=()):
-    """The `top` advice items of `files` scoring at least `min_score`, best first."""
+def advise(
+    files, cfg, top=20, min_score=10.0, kinds=(), profile=None, keep_unprofiled=False
+):
+    """The `top` advice items of `files` scoring at least `min_score`, best first. With a
+    `profile` (a `Profile`), scores come from measured time and functions that never ran
+    are dropped, unless `keep_unprofiled`."""
     parsed = [(text, rel) for rel, text in vectorize.read_sources(files, cfg)]
     libs = _libs([text for text, _ in parsed])
     found = []
     for text, rel in parsed:
-        found += scan(text, rel, cfg, libs)
+        found += scan(
+            text, rel, cfg, libs, profile=profile, keep_unprofiled=keep_unprofiled
+        )
     found = [
         a for a in found if a.score >= min_score and (not kinds or a.kind in kinds)
     ]

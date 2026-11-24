@@ -1,6 +1,8 @@
 """Advise mode: ranked refactoring advice for loops (never a gate)."""
 
 # pylint: disable=redefined-outer-name,duplicate-code
+import cProfile
+import importlib.util
 import textwrap
 
 import pytest
@@ -218,3 +220,88 @@ def test_cli_advise_never_fails(project, capsys):
     assert "  1." in out and "PAIRWISE" in out
     assert main(["advise", "--config", cfg, "--kind", "PARALLEL"]) == 0
     assert "nothing worth refactoring" in capsys.readouterr().out
+
+
+HOT = "import numpy as np\n" + textwrap.dedent("""
+    def analyze(path):
+        total = 0
+        for line in open(path):
+            for tok in line.split():
+                total += len(tok)
+        return total
+
+    def hot(paths):
+        out = []
+        for p in paths:
+            out.append(analyze(p))
+        return out
+
+    def cold(paths):
+        out = []
+        for p in paths:
+            out.append(analyze(p))
+        return out
+    """)
+
+
+@pytest.fixture
+def profiled(tmp_path):
+    """A project whose `hot` ran under cProfile and whose `cold` did not."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pysayme]\nroots = ["src"]\ndists = ["numpy"]\n'
+    )
+    (tmp_path / "src").mkdir()
+    module = tmp_path / "src" / "work.py"
+    module.write_text(HOT)
+    data = tmp_path / "data.txt"
+    data.write_text("a b c\n" * 50)
+    spec = importlib.util.spec_from_file_location("work", module)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    prof = cProfile.Profile()
+    prof.runcall(mod.hot, [str(data)] * 20)
+    prof.dump_stats(str(tmp_path / "out.prof"))
+    return tmp_path
+
+
+def test_profile_ranks_by_measured_time_and_drops_what_never_ran(profiled):
+    from pysayme import load_config, sources  # pylint: disable=import-outside-toplevel
+
+    cfg = load_config(profiled / "pyproject.toml")
+    files = sources.project_files(cfg.roots, cfg.base, cfg.exclude)
+    prof = advise.Profile(profiled / "out.prof")
+    got = advise.advise(files, cfg, top=0, min_score=0, profile=prof)
+    assert {a.qualname for a in got} == {"hot", "analyze"}
+    assert all("measured" in a.why for a in got)
+    both = advise.advise(
+        files, cfg, top=0, min_score=0, profile=prof, keep_unprofiled=True
+    )
+    assert {a.qualname for a in both} == {"hot", "analyze", "cold"}
+    cold = next(a for a in both if a.qualname == "cold")
+    assert "not seen running" in cold.why
+    assert cold.score < min(a.score for a in both if a.qualname != "cold")
+
+
+def test_cli_profile(profiled, capsys):
+    cfg = str(profiled / "pyproject.toml")
+    assert (
+        main(
+            [
+                "advise",
+                "--config",
+                cfg,
+                "--min-score",
+                "0",
+                "--profile",
+                str(profiled / "out.prof"),
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "measured" in out and "cold" not in out
+    assert (
+        main(["advise", "--config", cfg, "--profile", str(profiled / "missing.prof")])
+        == 2
+    )
+    assert "cannot read profile" in capsys.readouterr().err

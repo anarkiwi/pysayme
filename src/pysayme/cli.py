@@ -66,6 +66,15 @@ def parser():
     )
     d.add_argument("--kind", nargs="+", help="only these kinds, e.g. PARALLEL JIT")
     d.add_argument(
+        "--profile",
+        help="pstats file (python -m cProfile -o out.prof ...): rank by measured time",
+    )
+    d.add_argument(
+        "--include-unprofiled",
+        action="store_true",
+        help="with --profile, also list functions it never saw run (score 0)",
+    )
+    d.add_argument(
         "--min-trip", type=int, help="smallest literal loop length considered"
     )
     v = sub.add_parser("vectorize", help="report loops that numpy should replace")
@@ -84,7 +93,16 @@ def parser():
 def _advise(a):
     cfg = load_config(a.config, roots=a.roots or None, vectorize_min_trip=a.min_trip)
     files = sources.project_files(cfg.roots, cfg.base, cfg.exclude)
-    found = advise.advise(files, cfg, a.top, a.min_score, tuple(a.kind or ()))
+    prof = None
+    if a.profile:
+        try:
+            prof = advise.Profile(a.profile)
+        except (OSError, EOFError, TypeError, ValueError) as err:
+            print(f"pysayme: cannot read profile {a.profile}: {err}", file=sys.stderr)
+            return 2
+    found = advise.advise(
+        files, cfg, a.top, a.min_score, tuple(a.kind or ()), prof, a.include_unprofiled
+    )
     for i, item in enumerate(found, 1):
         print(f"{i:3d}. {item}")
     if not found:

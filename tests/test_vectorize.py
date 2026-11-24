@@ -290,9 +290,10 @@ def test_legal_loops_stay_quiet(name):
     assert scan(QUIET[name]) == []
 
 
-def test_dft_is_one_outer_finding():
-    found = scan("""
-        def dft(x: np.ndarray):
+NESTS = {
+    "dft": (
+        """
+        def f(x: np.ndarray):
             N = len(x)
             out = []
             for k in range(N):
@@ -301,8 +302,122 @@ def test_dft_is_one_outer_finding():
                     acc += x[n] * cmath.exp(-2j * math.pi * k * n / N)
                 out.append(acc)
             return out
+        """,
+        "sum",
+        lambda r: (r.normal(size=40) + 1j * r.normal(size=40),),
+    ),
+    "outer_sin": (
+        """
+        def f(a: np.ndarray, b: np.ndarray):
+            out = np.zeros((len(a), len(b)))
+            for i in range(len(a)):
+                for j in range(len(b)):
+                    out[i, j] = math.sin(a[i] * b[j])
+            return out
+        """,
+        "sin",
+        lambda r: (r.normal(size=12), r.normal(size=9)),
+    ),
+    "chained_index": (
+        """
+        def f(a: np.ndarray, b: np.ndarray):
+            out = np.zeros((len(a), len(b)))
+            for i in range(len(a)):
+                for j in range(len(b)):
+                    out[i][j] = a[i] + b[j] * 2
+            return out
+        """,
+        "add",
+        lambda r: (r.normal(size=12), r.normal(size=9)),
+    ),
+    "three_axes": (
+        """
+        def f(n):
+            out = np.zeros((n, n, n))
+            for i in range(n):
+                for j in range(n):
+                    for k in range(n):
+                        out[i, j, k] = i * 100 + j * 10 + k
+            return out
+        """,
+        "add",
+        lambda r: (6,),
+    ),
+    "row_reduce": (
+        """
+        def f(m: np.ndarray):
+            out = np.zeros(m.shape[0])
+            for i in range(m.shape[0]):
+                acc = 0.0
+                for j in range(m.shape[1]):
+                    acc += m[i, j] * m[i, j]
+                out[i] = acc
+            return out
+        """,
+        "sum",
+        lambda r: (r.normal(size=(7, 11)),),
+    ),
+    "offset_seed": (
+        """
+        def f(m: np.ndarray):
+            out = np.zeros(m.shape[0])
+            for i in range(m.shape[0]):
+                acc = 1.5
+                for j in range(m.shape[1]):
+                    acc += m[i, j]
+                out[i] = acc
+            return out
+        """,
+        "sum",
+        lambda r: (r.normal(size=(7, 11)),),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", NESTS)
+def test_nested_loops_become_one_broadcast_expression(name):
+    source, target, args = NESTS[name]
+    (found,) = scan(source)
+    assert (found.idiom, found.target) == ("OUTER", target)
+    assert "builds an array of shape" in found.after
+    ns = {}
+    exec(HEAD + textwrap.dedent(source), ns)  # pylint: disable=exec-used
+    values = args(np.random.default_rng(1))
+    names = list(ns["f"].__code__.co_varnames[: len(values)])
+    scope = {"np": np, **dict(zip(names, values))}
+    want = np.asarray(ns["f"](*values))
+    scope["out"] = np.zeros(want.shape, dtype=want.dtype)
+    scope["N"] = (
+        len(values[0]) if hasattr(values[0], "__len__") else 0
+    )  # DFT: `N = len(x)`
+    if "m" in scope:  # the reduction forms read the array's shape, as the loop did
+        scope["m"] = values[0]
+    exec(found.after.split("  #")[0], scope)  # pylint: disable=exec-used
+    np.testing.assert_allclose(scope["out"], want)
+
+
+def test_triangular_and_dependent_nests_are_left_alone():
+    assert not scan("""
+        def f(n):
+            out = np.zeros((n, n))
+            for i in range(n):
+                for j in range(i):
+                    out[i, j] = i + j
+            return out
         """)
-    assert [(f.idiom, f.target) for f in found] == [("OUTER", "einsum")]
+
+
+def test_nest_that_cannot_be_proved_stays_silent():
+    assert not scan("""
+        def f(x: np.ndarray, n):
+            out = []
+            for k in range(n):
+                acc = 0.0
+                for i in range(len(x)):
+                    acc += x[i] * helper(k)
+                out.append(acc)
+            return out
+        """)
 
 
 def test_grow_and_demote():

@@ -6,8 +6,6 @@ which turns a loop-body expression into a numpy one or raises `_Opaque`."""
 from __future__ import annotations
 
 import ast
-from collections import defaultdict
-from fnmatch import fnmatch
 from typing import NamedTuple
 
 ARRAY, ELEM, LISTED = "array", "elem", "listed"
