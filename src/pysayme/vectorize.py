@@ -725,7 +725,7 @@ class _Finder:
                         isinstance(n, ast.Name) and n.id == name
                         for a in v.args
                         for n in ast.walk(a)
-                    ):
+                    ) and not _read_elsewhere(loop, s, name):
                         self.add(
                             s,
                             "GROW",
@@ -733,6 +733,25 @@ class _Finder:
                             "collect the pieces in a list, `np.concatenate` once",
                         )
                         return
+
+
+def _read_elsewhere(loop, grow, name):
+    """Whether the loop reads `name` anywhere but in the statement that grows it.
+
+    An array that is filtered, trimmed, measured or tested on each pass (a sliding window, an
+    overlap carry, a stop rule) is not an accumulation: collecting pieces for one concatenate
+    would change what those reads see.
+    """
+    inside = {id(n) for n in ast.walk(grow)}
+    scope = list(loop.body) + ([loop.test] if isinstance(loop, ast.While) else [])
+    return any(
+        isinstance(n, ast.Name)
+        and n.id == name
+        and isinstance(n.ctx, ast.Load)
+        and id(n) not in inside
+        for part in scope
+        for n in ast.walk(part)
+    )
 
 
 def _decorated(fn, aliases):

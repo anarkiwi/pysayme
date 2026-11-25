@@ -435,6 +435,39 @@ def test_grow_and_demote():
     assert {(f.qualname, f.idiom) for f in found} == {("f", "GROW"), ("g", "DEMOTE")}
 
 
+def test_grow_skips_an_array_the_loop_also_reads():
+    found = scan("""
+        def window(n, size):
+            a = np.zeros(0)
+            for i in range(n):
+                a = a[a >= i - 3]
+                a = np.append(a, i)
+            return a
+
+        def carry(chunks):
+            tail = np.zeros(4)
+            for c in chunks:
+                tail = np.concatenate([tail, c])
+                tail = tail[-4:]
+            return tail
+
+        def stop(blocks):
+            got = np.zeros(0)
+            for one in blocks:
+                got = np.concatenate([got, one])
+                if got.size >= 10:
+                    break
+            return got
+
+        def plain(n):
+            a = np.zeros(0)
+            for i in range(n):
+                a = np.append(a, i)
+            return a
+        """)
+    assert {(f.qualname, f.idiom) for f in found} == {("plain", "GROW")}
+
+
 def test_helper_is_inlined_one_level():
     found = scan("""
         def gain(v):
