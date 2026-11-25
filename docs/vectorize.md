@@ -1,13 +1,14 @@
-# Proposal: `vectorize` mode
+# `vectorize` and `advise` modes
 
-Fail on pure-Python code that numpy would do much faster. Same contract as the rest of
-pysayme: a static finding names the call to use instead, an allowlist entry carries a
-reason, and the list can only shrink.
+`pysayme vectorize` fails on pure-Python code that numpy would do much faster. Same
+contract as the rest of pysayme: a static finding names the call to use instead, an
+allowlist entry carries a reason, and the list can only shrink. `pysayme advise` is
+the ranked, never-failing companion view. The sections below are the design both follow.
 
-Status: prototype. `pysayme vectorize` (the gate) and `pysayme advise` (the ranked
-advisory view) are implemented; the sections below are the design they follow. Not yet
-built: dynamic confirmation (running the rewrite against the loop for a speed-up), and
-broadcast rewrites for triangular nests, masks, and nests deeper than the shapes below.
+Not built: dynamic confirmation (running the rewrite against the loop for a speed-up),
+and broadcast rewrites for triangular nests and masks. Loop nests of any depth with
+rectangular bounds are rewritten as one broadcast expression; triangular bounds,
+mixed-variable subscripts and calls that cannot be proved pure are refused.
 
 ## Why it fits pysayme
 
