@@ -24,6 +24,12 @@ def pytest_addoption(parser):
         help="also gate on functions behaving like dependency callables",
     )
     group.addoption(
+        "--pysayme-vectorize",
+        action="store_true",
+        default=None,
+        help="also gate on Python loops that numpy would do faster",
+    )
+    group.addoption(
         "--no-pysayme",
         action="store_true",
         default=False,
@@ -64,7 +70,10 @@ class GateItem(pytest.Item):
 
     def runtest(self):
         behaviour = self.config.option.pysayme_behaviour
-        cfg = _config.load_config(self.path, progress=False, behaviour=behaviour)
+        vec = self.config.option.pysayme_vectorize
+        cfg = _config.load_config(
+            self.path, progress=False, behaviour=behaviour, vectorize=vec
+        )
         result = gate.check(cfg)
         if not result.ok:
             raise GateFailure(str(result))

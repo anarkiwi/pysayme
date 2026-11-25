@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__, gate, semantic, sources
+from . import __version__, advise, gate, semantic, sources, vectorize
 from .config import load_config
 
-COMMANDS = ("check", "rank")
+COMMANDS = ("check", "rank", "vectorize", "advise")
 
 
 def _common(p):
@@ -51,7 +51,37 @@ def parser():
         default=None,
         help="also run functions to find ones behaving like library callables",
     )
+    c.add_argument(
+        "--vectorize",
+        action="store_true",
+        default=None,
+        help="also report pure-Python loops that numpy would do faster",
+    )
     c.add_argument("--all", action="store_true", help="include allowlisted matches")
+    d = sub.add_parser("advise", help="rank loops worth refactoring (never fails)")
+    _common(d)
+    d.add_argument("--top", type=int, default=20, help="items to show (0: all)")
+    d.add_argument(
+        "--min-score", type=float, default=10.0, help="decibel-style score floor"
+    )
+    d.add_argument("--kind", nargs="+", help="only these kinds, e.g. PARALLEL JIT")
+    d.add_argument(
+        "--profile",
+        help="pstats file (python -m cProfile -o out.prof ...): rank by measured time",
+    )
+    d.add_argument(
+        "--include-unprofiled",
+        action="store_true",
+        help="with --profile, also list functions it never saw run (score 0)",
+    )
+    d.add_argument(
+        "--min-trip", type=int, help="smallest literal loop length considered"
+    )
+    v = sub.add_parser("vectorize", help="report loops that numpy should replace")
+    _common(v)
+    v.add_argument("--likely", action="store_true", help="include unproved matches")
+    v.add_argument("--min-trip", type=int, help="smallest literal loop length reported")
+    v.add_argument("--all", action="store_true", help="include allowlisted matches")
     r = sub.add_parser("rank", help="rank library look-alikes of project functions")
     _common(r)
     r.add_argument("--depth", type=int, default=2, help="library call depth")
@@ -60,15 +90,58 @@ def parser():
     return ap
 
 
+def _advise(a):
+    cfg = load_config(a.config, roots=a.roots or None, vectorize_min_trip=a.min_trip)
+    files = sources.project_files(cfg.roots, cfg.base, cfg.exclude)
+    prof = None
+    if a.profile:
+        try:
+            prof = advise.Profile(a.profile)
+        except (OSError, EOFError, TypeError, ValueError) as err:
+            print(f"pysayme: cannot read profile {a.profile}: {err}", file=sys.stderr)
+            return 2
+    found = advise.advise(
+        files, cfg, a.top, a.min_score, tuple(a.kind or ()), prof, a.include_unprofiled
+    )
+    for i, item in enumerate(found, 1):
+        print(f"{i:3d}. {item}")
+    if not found:
+        print("pysayme: nothing worth refactoring at this score")
+    return 0
+
+
+def _vectorize(a):
+    over = {
+        "vectorize": True,
+        "vectorize_min_trip": a.min_trip,
+        "vectorize_confidence": "likely" if a.likely else None,
+    }
+    cfg = load_config(a.config, roots=a.roots or None, **over)
+    files = sources.project_files(cfg.roots, cfg.base, cfg.exclude)
+    found = {k: str(f) for k, f in vectorize.find(files, cfg).items()}
+    result = gate.check(cfg, found)
+    for line in sorted((result.found if a.all else result.new).values()):
+        print(line)
+    if result.new:
+        print("\n" + gate.VECTORIZE_HOW)
+    if result.stale or result.unreasoned:
+        print(str(gate.Result({}, {}, result.stale, result.unreasoned)))
+    return 0 if result.ok else 1
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] not in COMMANDS + ("-h", "--help", "--version"):
         argv.insert(0, "check")
     a = parser().parse_args(argv)
     over = {k: getattr(a, k, None) for k in ("dists", "jobs", "copy", "inlined")}
-    flags = ("private", "cache", "self_join", "behaviour")
+    flags = ("private", "cache", "self_join", "behaviour", "vectorize")
     over.update({k: getattr(a, k, None) for k in flags})
     over["introspect"] = a.introspect
+    if a.command == "vectorize":
+        return _vectorize(a)
+    if a.command == "advise":
+        return _advise(a)
     cfg = load_config(a.config, roots=a.roots or None, **over)
     if not cfg.dists:
         print("pysayme: no dependencies to check against", file=sys.stderr)

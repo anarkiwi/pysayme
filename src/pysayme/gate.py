@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from . import behaviour, sources
+from . import behaviour, sources, vectorize
 from .match import allow_key, find, find_constants, find_self
 
 HOW = """\
@@ -15,6 +15,13 @@ is not quite right, change the call site, or the dependency, rather than keep a 
 A line naming two project locations is a copy within the project: call one from the
 other, or move it to a module both import. Only if the duplication is deliberate, add
 its key to [tool.pysayme.allow] in pyproject.toml with the reason as the value."""
+
+
+VECTORIZE_HOW = """\
+Each line above is a Python loop over a numpy array that numpy does in one call. Replace
+it with the call shown. If the loop is deliberate (a naive reference implementation a
+fast path is tested against, say), add its key to [tool.pysayme.allow] in
+pyproject.toml with the reason as the value."""
 
 
 def report(cfg):
@@ -59,6 +66,9 @@ def report(cfg):
             project, idx, kw["jobs"], cfg.cache, cfg.ambiguous, cfg.progress
         )
         for f in found:
+            out.setdefault(f.key(), str(f))
+    if cfg.vectorize:
+        for f in vectorize.find(files, cfg).values():
             out.setdefault(f.key(), str(f))
     return out
 

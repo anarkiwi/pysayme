@@ -10,7 +10,7 @@ from pathlib import Path
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
-from . import extract, match
+from . import extract, match, vectorize
 
 
 @dataclass
@@ -35,6 +35,11 @@ class Config:
     cache: bool = True
     introspect: bool = True
     progress: bool = True
+    vectorize: bool = False
+    vectorize_min_trip: int = 64
+    vectorize_confidence: str = "proved"
+    vectorize_exclude: list = field(default_factory=lambda: list(vectorize.EXCLUDE))
+    array_libs: list = field(default_factory=lambda: ["numpy", "scipy"])
 
 
 def _requirement(line):
