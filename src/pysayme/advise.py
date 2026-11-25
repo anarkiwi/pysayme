@@ -65,6 +65,7 @@ MULT = {  # how much of a loop's cost a refactor of this kind could remove
     "VECTORIZE": 3.0, "PARALLEL": 1.0, "CONCURRENT": 1.0, "JIT": 2.0, "SERIAL": 0.3,
     "MEMBERSHIP": 4.0, "PAIRWISE": 4.0, "LIST_HEAD": 2.0, "STRCAT": 1.0, "REPEATED": 2.0,
 }  # fmt: skip
+CUMULATIVE_KINDS = frozenset({"PARALLEL", "CONCURRENT", "SERIAL"})  # the callees' time is the prize
 ADVICE = {
     "PARALLEL": "independent iterations, heavy body: run them across cores "
     "(process pool); assumes the callees are pure",
@@ -87,25 +88,30 @@ ADVICE = {
 class Profile:  # pylint: disable=too-few-public-methods
     """Measured time per function, from a pstats file (``python -m cProfile -o out.prof``).
 
-    A pstats file has no per-loop times, so a function's cumulative time is shared among
-    its advised loops by their static cost."""
+    A pstats file has no per-loop times, so a function's time is shared among its advised
+    loops by their static cost. Which time depends on what the advice removes: kinds that
+    run the body across cores (`CUMULATIVE_KINDS`) gain from the callees' time too, while
+    a rewrite that only removes interpreter overhead (vectorize, JIT, a better algorithm)
+    leaves the callees as slow as they were, so it is scored on the function's own time."""
 
     def __init__(self, path):
         stats = pstats.Stats(str(path)).stats  # pylint: disable=no-member
         self.rows = [
-            (Path(f).as_posix(), line, name, ct, calls)
-            for (f, line, name), (_, calls, _, ct, _) in stats.items()
+            (Path(f).as_posix(), line, name, ct, tt, calls)
+            for (f, line, name), (_, calls, tt, ct, _) in stats.items()
         ]
 
     def find(self, rel, name, lo, hi):
-        """(cumulative seconds, calls) of the function `name` defined on lines lo..hi of
-        `rel`, or None when the profile never saw it run."""
+        """(cumulative seconds, own seconds, calls) of the function `name` defined on lines
+        lo..hi of `rel`, or None when the profile never saw it run."""
         hits = [
-            (ct, calls)
-            for f, line, n, ct, calls in self.rows
+            (ct, tt, calls)
+            for f, line, n, ct, tt, calls in self.rows
             if n == name and lo <= line <= hi and (f == rel or f.endswith("/" + rel))
         ]
-        return (sum(h[0] for h in hits), sum(h[1] for h in hits)) if hits else None
+        if not hits:
+            return None
+        return tuple(sum(h[i] for h in hits) for i in range(3))
 
 
 class Advice(NamedTuple):
@@ -425,10 +431,12 @@ class _Advisor:
             else:
                 if self.fn_cost is None:
                     self.fn_cost = max(self.block_cost(self.sc.body), 1.0)
-                seconds, calls = self.measured
+                total, own, calls = self.measured
+                seconds = total if kind in CUMULATIVE_KINDS else own
                 share = min(1.0, cost / self.fn_cost)
                 score = 10 * math.log10(1 + seconds * share * 1e6 * MULT[kind] / 1000)
-                why += f"; measured {seconds:.3g}s cumulative over {calls} calls in this function"
+                basis = "cumulative" if kind in CUMULATIVE_KINDS else "own (callees excluded)"
+                why += f"; measured {seconds:.3g}s {basis} over {calls} calls in this function"
         self.out.append(
             Advice(
                 self.rel, node.lineno, self.qual, kind, round(score, 1),
