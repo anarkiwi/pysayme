@@ -188,6 +188,35 @@ def test_libs_hint_and_ranking():
     assert cost["PAIRWISE"] > cost["STRCAT"]
 
 
+def _profile(total, own):
+    """A Profile of the one function `f` (m.py, `def` on line 5) with the given times, built without a file."""
+    prof = advise.Profile.__new__(advise.Profile)
+    prof.rows = [("m.py", 5, "f", total, own, 4)]
+    return prof
+
+
+def test_profile_scores_overhead_kinds_on_own_time_and_parallel_on_cumulative():
+    src = """
+    def f(x: np.ndarray, paths):
+        out = []
+        y = 0.0
+        for v in x:
+            y = 0.9 * y + v
+            out.append(y)
+        for p in paths:
+            out.append(analyze(p))
+        return out
+    """ + HEAVY
+    # nearly all of f's time is in a callee: parallel gains it, a JIT does not
+    found = {a.kind: a for a in run(src, profile=_profile(10.0, 0.01))}
+    assert found["PARALLEL"].score > found["JIT"].score + 10
+    assert "cumulative" in found["PARALLEL"].why and "10s" in found["PARALLEL"].why
+    assert "own (callees excluded)" in found["JIT"].why and "0.01s" in found["JIT"].why
+    # the same function with its time in its own bytecode ranks the JIT with the parallel loop
+    own = {a.kind: a for a in run(src, profile=_profile(10.0, 10.0))}
+    assert own["JIT"].score > found["JIT"].score + 10
+
+
 @pytest.fixture
 def project(tmp_path):
     (tmp_path / "pyproject.toml").write_text(

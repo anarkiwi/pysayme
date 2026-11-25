@@ -259,6 +259,8 @@ pysayme advise --profile out.prof
 ```
 
 A pstats file records time per function. `advise` matches each function by file, name and
-definition line, spreads its cumulative time over its advised loops by static cost, and
-scores the result. Functions the profile never saw run are dropped (`--include-unprofiled`
+definition line, spreads its time over its advised loops by static cost, and scores the
+result. `PARALLEL`, `CONCURRENT` and `SERIAL` advice uses cumulative time (the callees are
+what running iterations side by side buys); every other kind removes only interpreter
+overhead, so it uses the function's own time and says so in its note. Functions the profile never saw run are dropped (`--include-unprofiled`
 lists them at score 0). Per-loop times need a line profiler; Scalene output is not read.
