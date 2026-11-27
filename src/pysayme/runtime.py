@@ -12,8 +12,10 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import warnings
 from collections import defaultdict
+from pathlib import Path
 from typing import NamedTuple
 
 from tqdm import tqdm
@@ -21,6 +23,7 @@ from tqdm import tqdm
 from . import extract, probe
 
 IMPORT_TIMEOUT = 60.0
+WATCH_S = 0.05
 CHILD_ENV = {
     "OMP_NUM_THREADS": "1",
     "MKL_NUM_THREADS": "1",
@@ -135,6 +138,40 @@ def module_exports(name):
         return []
 
 
+def _limit_bytes(path):
+    try:
+        text = Path(path).read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+    return int(text) if text.isdigit() else None
+
+
+def memory_total():
+    """Bytes of memory this process may use: the machine's, or its cgroup's limit
+    where that is lower."""
+    total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    for path in (
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ):
+        cap = _limit_bytes(path)
+        if cap:
+            total = min(total, cap)
+    return total
+
+
+def resident(pid):
+    """Resident bytes of process `pid`, 0 once it has gone."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return 0
+
+
 def _serve(fn, home, conn):
     devnull = os.open(os.devnull, os.O_RDWR)
     for fd in (0, 1, 2):
@@ -155,11 +192,14 @@ def _serve(fn, home, conn):
 
 class Workers:
     """Spawned children, isolated from the caller's output, working directory and
-    thread pools, that run `fn` on tasks. A task whose child dies or overruns its
-    timeout yields None, and a fresh child takes the next task."""
+    thread pools, that run `fn` on tasks. A task whose child dies, overruns its
+    timeout or holds more than `memory` resident bytes yields None, and a fresh
+    child takes the next task. `memory` defaults to an even share of
+    `memory_total()` between the children and the caller."""
 
-    def __init__(self, fn, jobs=1):
+    def __init__(self, fn, jobs=1, memory=None):
         self.fn, self.jobs = fn, max(1, jobs or os.cpu_count() or 1)
+        self.memory = memory or memory_total() // (self.jobs + 1)
         self._ctx = multiprocessing.get_context("spawn")
         self._home = tempfile.TemporaryDirectory(  # pylint: disable=consider-using-with
             prefix="pysayme-"
@@ -185,6 +225,19 @@ class Workers:
         send.close()
         return child, recv
 
+    def _wait(self, worker, seconds):
+        """True once `worker` has answered within `seconds`; False if it has not, or
+        if its resident memory passes the budget first."""
+        deadline = time.monotonic() + seconds
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            if worker[1].poll(min(WATCH_S, left)):
+                return True
+            if resident(worker[0].pid) > self.memory:
+                return False
+
     @staticmethod
     def _stop(worker):
         worker[0].kill()
@@ -208,7 +261,7 @@ class Workers:
                 worker = worker or self._start()
                 try:
                     worker[1].send(item[1])
-                    done = worker[1].poll(limit(item[1]))
+                    done = self._wait(worker, limit(item[1]))
                     if done:
                         out[item[0]] = worker[1].recv()
                 except (EOFError, OSError):

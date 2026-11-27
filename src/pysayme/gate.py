@@ -63,7 +63,13 @@ def report(cfg):
     if cfg.behaviour:
         project = behaviour.project_candidates(files)
         found = behaviour.find(
-            project, idx, kw["jobs"], cfg.cache, cfg.ambiguous, cfg.progress
+            project,
+            idx,
+            kw["jobs"],
+            cfg.cache,
+            cfg.ambiguous,
+            cfg.progress,
+            cfg.child_memory or None,
         )
         for f in found:
             out.setdefault(f.key(), str(f))

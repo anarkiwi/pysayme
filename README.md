@@ -87,6 +87,7 @@ iterations over cores, JIT a scalar recurrence, or fix an O(n^2) pattern). See
 | `ambiguous` | `false` | also report matches that fit several functions |
 | `self` | `true` | also match project functions against each other |
 | `jobs` | all CPUs | worker processes and join threads |
+| `child-memory` | an even share of memory | resident bytes a behaviour child may hold before it is ended and its call skipped |
 | `cache` | `true` | cache dependency indexes (`$PYSAYME_CACHE`, else `~/.cache/pysayme`) |
 | `behaviour` | `false` | also run project functions and dependency callables (compiled ones included) on seeded probes, and report project functions that behave like one (`--behaviour`); executes dependency code, so meant as a release gate |
 | `introspect` | `true` | import dependencies' public modules in a child process to find their public names (`--no-introspect`) |

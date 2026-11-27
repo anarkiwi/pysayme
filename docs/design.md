@@ -276,8 +276,12 @@ Each call has `probe.CALL_TIMEOUT` (2 s, against probes of at most 64 elements),
 signalled by SIGALRM and raised as a `BaseException` so library `except Exception`
 blocks do not swallow it. C code that holds the interpreter past twice that is ended
 by faulthandler's C watchdog thread, which exits the child. Each task also has a
-parent-side deadline as a backstop. A callable that times out, or kills its
-child, is skipped, and a fresh child takes the next task. Each call gets fresh
+parent-side deadline as a backstop. The parent also reads each child's resident
+memory while it waits, and ends a child that holds more than its budget
+(`child-memory`, by default an even share of the machine's or cgroup's memory
+between the children and the parent), so a probe that sizes an array from a
+nonsense argument cannot take the machine's memory. A callable that times out,
+overruns its memory or kills its child is skipped, and a fresh child takes the next task. Each call gets fresh
 inputs, so in-place mutation cannot leak into later probes.
 
 **Caching.** Library fingerprints are cached per distribution, next to its index

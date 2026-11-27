@@ -193,12 +193,15 @@ def _agree(a, b, is_scale):
     return a.exact_ok and a.exact == b.exact
 
 
-def find(project, idx, jobs=None, cache=True, ambiguous=False, progress=True):
+def find(
+    project, idx, jobs=None, cache=True, ambiguous=False, progress=True, memory=None
+):
     """Findings of the project Candidates whose fingerprints join library callables
     of a single name (several if `ambiguous`) that agree with them again on fresh
-    probes; a function that calls a callable it behaves like is a wrapper."""
+    probes; a function that calls a callable it behaves like is a wrapper. A probe
+    whose child holds more than `memory` resident bytes gives no fingerprint."""
     demand = sorted({t for c in project for t in c.tuples})
-    with runtime.Workers(probe.run, jobs) as pool:
+    with runtime.Workers(probe.run, jobs, memory) as pool:
         lib = library_fingerprints(idx, demand, pool, cache, progress)
         tasks = [(c.target, ((),), c.tuples, PROBE) for c in project]
         got = pool.map(tasks, _timeout, "project behaviour", progress, "function")

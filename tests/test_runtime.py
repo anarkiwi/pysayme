@@ -5,6 +5,7 @@
 import functools
 import math
 import os
+import time
 import types
 
 import numpy as np
@@ -108,6 +109,7 @@ def fixture_rt(tmp_path, monkeypatch):
             "rtmods/hang.py": "import time\ntime.sleep(60)\n",
             "rtmods/bad.py": "raise ImportError('no')\n",
             "rtmods/noisy.py": "print('noise')\nimport sys\nprint('x', file=sys.stderr)\n",
+            "rtmods/hog.py": "import time\nheld = b'\\x01' * (1 << 30)\ntime.sleep(60)\n",
         },
     )
     monkeypatch.syspath_prepend(str(path))
@@ -135,6 +137,32 @@ def test_workers_isolate_and_reuse():
         assert [g is None for g in got] == [False, True, False, True, False]
         assert pool.map(["rtmods"], 5, progress=False)[0] == got[0]
         assert not pool.map([], 5, progress=False)
+
+
+@pytest.mark.usefixtures("rt")
+def test_workers_end_a_child_past_its_memory():
+    with runtime.Workers(runtime.module_exports, 1, memory=512 << 20) as pool:
+        start = time.monotonic()
+        got = pool.map(["rtmods.hog", "rtmods"], 30, progress=False)
+        assert got[0] is None and got[1] is not None
+        assert time.monotonic() - start < 30
+
+
+def test_memory_reading(tmp_path):
+    assert runtime.resident(os.getpid()) > 0
+    assert runtime.resident(2**22 + 1) == 0
+    assert (
+        0
+        < runtime.memory_total()
+        <= os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    )
+    (tmp_path / "max").write_text("max\n")
+    (tmp_path / "cap").write_text("1048576\n")
+    limit = runtime._limit_bytes  # pylint: disable=protected-access
+    assert limit(tmp_path / "max") is None
+    assert limit(tmp_path / "cap") == 1 << 20
+    assert limit(tmp_path / "missing") is None
+    assert runtime.Workers(plain, 3).memory == runtime.memory_total() // 4
 
 
 def test_introspect_merges_records(monkeypatch, tmp_path):
